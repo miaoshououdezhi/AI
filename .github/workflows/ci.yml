@@ -15,7 +15,8 @@ jobs:
         run: |
           for file in xray-manager.sh lib/*.sh tests/*.sh; do bash -n "$file"; done
           sh -n install.sh
-          shellcheck -x -S warning xray-manager.sh install.sh lib/*.sh tests/*.sh
+          sh -n deploy.sh
+          shellcheck -x -S warning xray-manager.sh install.sh deploy.sh lib/*.sh tests/*.sh
       - name: Shell transactions
         run: bash tests/test-shell.sh
       - name: Platform tests

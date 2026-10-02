@@ -8,36 +8,26 @@
 
 ### VPS 一键远程部署
 
-通过 SSH 登录 VPS，切换到 **root** 后，复制执行下面这一整条命令。它自动安装下载依赖、下载完整项目并部署 Xray，无需预先安装 Git 或 Bash：
+通过 SSH 登录 VPS，切换到 **root** 后，使用 `wget` 下载独立安装脚本，再在本地用 `sh` 执行：
 
 ```sh
-sh -c '
-set -eu
-[ "$(id -u)" -eq 0 ] || { printf "%s\n" "请先切换到 root 再执行。" >&2; exit 1; }
-. /etc/os-release
-case "$ID:$VERSION_ID" in
-  debian:12|debian:13)
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tar gzip
-    ;;
-  alpine:3.23|alpine:3.23.*|alpine:3.24|alpine:3.24.*)
-    apk add --no-cache ca-certificates curl tar gzip
-    ;;
-  *) printf "%s\n" "仅支持 Debian 12/13 和 Alpine 3.23/3.24。" >&2; exit 1 ;;
-esac
-xray_tmp=$(mktemp -d)
-cleanup() { rm -rf -- "$xray_tmp"; }
-trap cleanup 0
-curl --http1.1 --fail --location --proto "=https" --proto-redir "=https" --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 \
-  -o "$xray_tmp/project.tar.gz" \
-  https://github.com/miaoshououdezhi/AI/archive/d02efa3dc12fe3e9a38b7cbe3eeb38171599fd0e.tar.gz
-mkdir "$xray_tmp/project"
-tar -xzf "$xray_tmp/project.tar.gz" -C "$xray_tmp/project" --strip-components=1
-sh "$xray_tmp/project/install.sh"
-'
+wget -O xray-manager-install.sh https://raw.githubusercontent.com/miaoshououdezhi/AI/main/deploy.sh && \
+sh xray-manager-install.sh
 ```
 
-该命令固定到已通过验证的项目提交，避免远程分支更新时安装内容随之改变。安装结束后，执行 `bash /opt/xray-manager/xray-manager.sh` 进入中文菜单。重复部署保留已有节点和核心；首次安装没有公网节点。
+`deploy.sh` 是可单独下载运行的远程安装入口，会自动准备下载依赖、获取完整项目，再调用项目内的 `install.sh`；无需预装 Git 或 Bash。项目内的 `install.sh` 需要同目录中的模块文件，不适合单独下载执行。
+
+如果 VPS 尚未提供 `wget` 或 HTTPS 根证书，先执行对应系统的准备命令：
+
+```sh
+# Debian 12/13
+apt-get update && apt-get install -y wget ca-certificates
+
+# Alpine 3.23/3.24
+apk add --no-cache wget ca-certificates
+```
+
+远程安装入口固定下载已通过验证的项目提交。安装结束后，执行 `bash /opt/xray-manager/xray-manager.sh` 进入中文菜单。重复部署保留已有节点和核心；首次安装没有公网节点。
 
 ### 下载仓库后安装
 
