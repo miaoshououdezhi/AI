@@ -148,8 +148,8 @@ platform_fetch_core() (
     tmp=$(mktemp -d "${dest%/*}/.xray-download.XXXXXXXX") || return 1
     trap 'rm -rf -- "$tmp"' EXIT
     url="https://github.com/XTLS/Xray-core/releases/download/$version/$asset"
-    curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --output "$tmp/core.zip" "$url" || return 1
-    curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 60 --max-filesize 16384 --output "$tmp/core.dgst" "$url.dgst" || return 1
+    curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --output "$tmp/core.zip" "$url" || return 1
+    curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 60 --max-filesize 16384 --output "$tmp/core.dgst" "$url.dgst" || return 1
     python3 - "$tmp/core.zip" "$tmp/core.dgst" "$tmp/xray" "$XM_ARCH" <<'PY'
 import hashlib, pathlib, re, stat, struct, sys, zipfile
 archive, digest, output, arch = sys.argv[1:]
