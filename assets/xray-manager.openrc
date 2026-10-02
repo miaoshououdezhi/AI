@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# xray-manager-owned:1
+description="Xray Manager core"
+supervisor="supervise-daemon"
+command="/bin/setpriv"
+command_args="--reuid=xray-manager --regid=xray-manager --init-groups --bounding-set=-all,+net_bind_service --inh-caps=+net_bind_service --ambient-caps=+net_bind_service --no-new-privs /opt/xray-manager/bin/xray run -config /etc/xray-manager/config.json"
+directory="/var/lib/xray-manager"
+pidfile="/run/xray-manager.pid"
+output_log="/var/log/xray-manager/console.log"
+error_log="/var/log/xray-manager/console.log"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+umask=0027
+rc_ulimit="-n 32768"
+
+depend() {
+    need loopback
+    use net
+    after firewall
+}
+
+start_pre() {
+    checkpath --directory --owner root:xray-manager --mode 0750 /var/log/xray-manager || return 1
+    checkpath --file --owner root:xray-manager --mode 0640 "$output_log" || return 1
+    /bin/setpriv --reuid=xray-manager --regid=xray-manager --init-groups /opt/xray-manager/bin/xray run -test -config /etc/xray-manager/config.json >/dev/null 2>&1 || return 1
+}

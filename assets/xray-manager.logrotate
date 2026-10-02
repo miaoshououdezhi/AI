@@ -1,0 +1,13 @@
+# xray-manager-owned:1
+/var/log/xray-manager/console.log {
+    daily
+    maxsize 10M
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0640 root xray-manager
+    su root xray-manager
+}

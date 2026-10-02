@@ -1,0 +1,41 @@
+# xray-manager-owned:1
+[Unit]
+Description=Xray Manager core
+Documentation=https://github.com/XTLS/Xray-core
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=xray-manager
+Group=xray-manager
+UMask=0027
+WorkingDirectory=/var/lib/xray-manager
+ExecStart=/opt/xray-manager/bin/xray run -config /etc/xray-manager/config.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+LimitNOFILE=32768
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/xray-manager /var/log/xray-manager
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=500
+
+[Install]
+WantedBy=multi-user.target

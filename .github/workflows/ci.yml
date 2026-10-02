@@ -1,0 +1,53 @@
+name: Validate xray-manager
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  static-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck curl unzip openssl python3 util-linux
+      - name: Syntax and shellcheck
+        run: |
+          for file in xray-manager.sh lib/*.sh tests/*.sh; do bash -n "$file"; done
+          sh -n install.sh
+          shellcheck -x -S warning xray-manager.sh install.sh lib/*.sh tests/*.sh
+      - name: Shell transactions
+        run: bash tests/test-shell.sh
+      - name: Platform tests
+        run: bash tests/test-platform.sh
+      - name: Protocol tests
+        run: bash tests/test-protocol.sh
+  os-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:12', 'debian:13', 'alpine:3.23', 'alpine:3.24']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package, binary, native configuration smoke test
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD:/src:ro" "$IMAGE" sh -ec '
+            if command -v apk >/dev/null; then apk add --no-cache bash; else apt-get update && apt-get install -y bash; fi
+            bash -c '\''
+              source /src/lib/common.sh
+              source /src/lib/platform.sh
+              source /src/lib/protocol.sh
+              platform_detect && platform_dependencies || exit 1
+              export XM_ROOT=/tmp/xm-smoke
+              source /src/lib/common.sh
+              platform_prepare || exit 1
+              platform_fetch_core v26.3.27 "$XM_BIN" || exit 1
+              printf "{\"schema_version\":1,\"core_version\":\"v26.3.27\",\"nodes\":[]}\n" > "$XM_ETC/state.json"
+              protocol_generate "$XM_ETC/state.json" "$XM_ETC/config.json" || exit 1
+              "$XM_BIN" run -test -config "$XM_ETC/config.json" || exit 1
+            '\''
+          '
+# Container jobs do not claim systemd/OpenRC boot or ARM64 service verification.
