@@ -178,7 +178,7 @@ xm_service() {
 xm_logs() {
     (($# <= 1)) || { xm_usage_error 'logs 最多接受一个行数。'; return 2; }
     local lines=${1:-80}
-    [[ $lines =~ ^[0-9]+$ && $lines -ge 1 && $lines -le 1000 ]] || { xm_usage_error '行数必须在 1..1000。'; return 2; }
+    [[ $lines =~ ^[0-9]+$ && ${#lines} -le 4 ]] && ((10#$lines >= 1 && 10#$lines <= 1000)) || { xm_usage_error '行数必须在 1..1000。'; return 2; }
     xm_ready && platform_logs "$lines"
 }
 xm_diagnose() {
@@ -221,13 +221,16 @@ xm_uninstall() {
     xm_ready || return 1
     xm_confirm "卸载 $XM_PRODUCT 并删除全部节点与核心？独立备份和外部证书会保留。" || return 2
     local directory file
+    local -a files=("$XM_STATE" "$XM_CONFIG" "$XM_ETC/core.previous-version" "$XM_BIN" "$XM_HOME/bin/xray.previous" "$XM_HOME/xray-manager.sh" "$XM_HOME/install.sh" "$XM_HOME/lib/common.sh" "$XM_HOME/lib/state.sh" "$XM_HOME/lib/platform.sh" "$XM_HOME/lib/protocol.sh" "$XM_HOME/assets/xray-manager.service" "$XM_HOME/assets/xray-manager.openrc" "$XM_HOME/assets/xray-manager.logrotate")
     for directory in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do
         xm_owned "$directory" || { xm_error "目录缺少所有权标记，拒绝删除：$directory"; return 1; }
     done
+    # Preflight every leaf and ancestor before stopping services or deleting anything.
+    for file in "${files[@]}"; do xm_path_no_links "$file" || return 1; done
     xm_service_call stop && xm_service_call disable && platform_remove_service || return 1
     # Explicit names only: unknown files, backups, certificates, and service account remain.
-    for file in "$XM_STATE" "$XM_CONFIG" "$XM_ETC/core.previous-version" "$XM_BIN" "$XM_HOME/bin/xray.previous" "$XM_HOME/xray-manager.sh" "$XM_HOME/install.sh" "$XM_HOME/lib/common.sh" "$XM_HOME/lib/state.sh" "$XM_HOME/lib/platform.sh" "$XM_HOME/lib/protocol.sh" "$XM_HOME/assets/xray-manager.service" "$XM_HOME/assets/xray-manager.openrc" "$XM_HOME/assets/xray-manager.logrotate"; do
-        [[ ! -L $file ]] || { xm_error "拒绝删除符号链接：$file"; return 1; }
+    for file in "${files[@]}"; do
+        xm_path_no_links "$file" || return 1
         rm -f -- "$file" || return 1
     done
     xm_info '已卸载。备份、外部证书、日志与未知文件保留；使用原始源码 install 可重新安装。'

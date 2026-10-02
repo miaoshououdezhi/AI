@@ -124,3 +124,23 @@ rg_cmd='grep'
 if XM_ROOT="$ROOT" bash "$REPO/xray-manager.sh" unknown >/dev/null 2>&1; then fail 'unknown command accepted'; fi
 XM_ROOT="$ROOT" bash "$REPO/xray-manager.sh" menu < /dev/null >/dev/null 2>&1 || fail 'menu EOF did not exit'
 pass 'help, unknown command, and EOF handled'
+
+# Regression: replacing a managed library directory with a symlink must never
+# delete an outside file or change service state. Only a trusted function is loaded.
+(
+    # shellcheck disable=SC1090
+    source <(sed -n '/^xm_uninstall() {/,/^}/p' "$REPO/xray-manager.sh")
+    xm_ready() { return 0; }
+    xm_confirm() { return 0; }
+    xm_service_call() { touch "$ROOT/service-touched"; }
+    platform_remove_service() { touch "$ROOT/service-touched"; }
+    for directory in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do
+        printf 'xray-manager:1\n' > "$directory/.xray-manager-owned"
+    done
+    mkdir -p "$ROOT/foreign-lib"
+    printf 'retain\n' > "$ROOT/foreign-lib/common.sh"
+    ln -s "$ROOT/foreign-lib" "$XM_HOME/lib"
+    if xm_uninstall; then fail 'uninstall accepted symlink ancestor'; fi
+    [[ $(cat "$ROOT/foreign-lib/common.sh") == retain && ! -e $ROOT/service-touched ]] || fail 'uninstall crossed ownership boundary'
+)
+pass 'uninstall refuses ancestor symlink before service changes or deletion'
