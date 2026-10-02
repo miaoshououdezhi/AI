@@ -19,6 +19,8 @@ jobs:
           shellcheck -x -S warning xray-manager.sh install.sh deploy.sh lib/*.sh tests/*.sh
       - name: Shell transactions
         run: bash tests/test-shell.sh
+      - name: Interactive defaults, validation and terminal styles
+        run: bash tests/test-interactive.sh
       - name: Platform tests
         run: bash tests/test-platform.sh
       - name: Protocol tests

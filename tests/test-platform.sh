@@ -109,4 +109,114 @@ TEST_LISTENER=tcp
 expect_fail platform_port_available 8000
 TEST_LISTENER=udp
 expect_fail platform_port_available 8000
-printf 'PASS: platform matrix, ownership, sandbox refusal, archive integrity/security, TCP/UDP conflict tests\n'
+
+
+# Read-only interactive helpers: real JSON/IP parsing behind controlled HTTPS fixtures.
+export TEST_HELPER_DIR=$TEST_ROOT/helpers
+mkdir -p "$TEST_HELPER_DIR"
+python3 - "$TEST_HELPER_DIR" <<'PY'
+import datetime, json, pathlib, sys
+p=pathlib.Path(sys.argv[1])
+rows=[]
+for i in range(100):
+    published=(datetime.datetime(2026,9,30)-datetime.timedelta(days=i)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    rows.append({'draft':False,'prerelease':True,'tag_name':'v26.9.'+str(i+1),'published_at':published})
+(p/'page-1.json').write_text(json.dumps(list(reversed(rows))))
+(p/'page-2.json').write_text(json.dumps([
+ {'draft':True,'tag_name':'malicious\tignored'},
+ {'draft':False,'prerelease':False,'tag_name':'v26.3.27','published_at':'2026-03-27T17:51:00Z'},
+ {'draft':False,'prerelease':False,'tag_name':'v26.2.6','published_at':'2026-02-06T10:00:00Z'},
+ {'draft':False,'prerelease':False,'tag_name':'v99.0.0','published_at':'2020-01-01T00:00:00Z'},
+ {'draft':False,'prerelease':True,'tag_name':'v26.10.1-beta','published_at':'2026-10-01T00:00:00Z'}]))
+(p/'bad-bool.json').write_text(json.dumps([{'draft':False,'prerelease':'false','tag_name':'v1.2.3','published_at':'2026-01-01T00:00:00Z'}]))
+(p/'bad-date.json').write_text(json.dumps([{'draft':False,'prerelease':False,'tag_name':'v1.2.3','published_at':'2026-02-31T00:00:00Z'}]))
+(p/'bad-tag.json').write_text(json.dumps([{'draft':False,'prerelease':False,'tag_name':'v1.2.3;id','published_at':'2026-01-01T00:00:00Z'}]))
+(p/'rate-limit.json').write_text('{"message":"API rate limit"}')
+(p/'invalid-json.json').write_text('[malformed')
+PY
+cat > "$TEST_ROOT/mockbin/curl" <<'MOCKHELPER'
+#!/usr/bin/env bash
+set -eu
+out=''
+while (($#)); do
+    if [[ $1 == --output ]]; then out=$2; shift 2; else url=$1; shift; fi
+done
+printf '%s\n' "$url" >> "$TEST_HELPER_DIR/requests"
+case $url in
+    'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100&page='*)
+        case ${TEST_HELPER_MODE:-normal} in
+            http-failure) exit 22 ;;
+            invalid-json|rate-limit|bad-bool|bad-date|bad-tag) cp "$TEST_HELPER_DIR/$TEST_HELPER_MODE.json" "$out" ;;
+            endless) cp "$TEST_HELPER_DIR/page-1.json" "$out" ;;
+            missing-preview) printf '[{"draft":false,"prerelease":false,"tag_name":"v1.0.0","published_at":"2026-01-01T00:00:00Z"}]\n' > "$out" ;;
+            *) cp "$TEST_HELPER_DIR/page-${url##*=}.json" "$out" ;;
+        esac ;;
+    https://api.ipify.org|https://api64.ipify.org|https://icanhazip.com)
+        case ${TEST_HELPER_MODE:-ipv4} in
+            ip-http-failure) exit 22 ;;
+            ipv4) printf '8.8.8.8\n' > "$out" ;;
+            ipv6) printf '2001:4860:4860::8888\n' > "$out" ;;
+            ip-fallback) if [[ $url == https://api.ipify.org ]]; then printf '192.168.1.1' > "$out"; else printf '1.1.1.1' > "$out"; fi ;;
+            private-ip) printf '10.1.2.3' > "$out" ;;
+            mapped-private) printf '::ffff:192.168.1.1' > "$out" ;;
+            multicast) printf '224.0.0.1' > "$out" ;;
+            scoped-ipv6) printf '2001:4860::1%%eth0' > "$out" ;;
+            ip-injection) printf '8.8.8.8\033[31m' > "$out" ;;
+            ip-nul) printf '8.8.8.8\000' > "$out" ;;
+            *) exit 1 ;;
+        esac ;;
+    *) exit 1 ;;
+esac
+MOCKHELPER
+chmod 0755 "$TEST_ROOT/mockbin/curl"
+export TEST_HELPER_MODE=normal
+choices=$(platform_release_choices)
+expected=$'stable\tv26.3.27\t2026-03-27T17:51:00Z\nstable\tv26.2.6\t2026-02-06T10:00:00Z\npreview\tv26.9.1\t2026-09-30T00:00:00Z\npreview\tv26.9.2\t2026-09-29T00:00:00Z'
+[[ $choices == "$expected" ]] || fail 'published order, draft filtering, pagination, safe tag filtering'
+for TEST_HELPER_MODE in http-failure invalid-json rate-limit bad-bool bad-date bad-tag endless; do
+    export TEST_HELPER_MODE
+    expect_fail platform_release_choices
+    [[ ! -s $TEST_ROOT/failure.stdout ]] || fail 'partial release choices on failure'
+done
+TEST_HELPER_MODE='missing-preview'
+[[ $(platform_release_choices) == $'stable\tv1.0.0\t2026-01-01T00:00:00Z' ]] || fail 'missing preview invented'
+TEST_HELPER_MODE=ipv4
+[[ $(platform_public_ip) == 8.8.8.8 ]] || fail 'IPv4 detection'
+TEST_HELPER_MODE=ipv6
+[[ $(platform_public_ip) == 2001:4860:4860::8888 ]] || fail 'IPv6 detection'
+TEST_HELPER_MODE=ip-fallback
+[[ $(platform_public_ip) == 1.1.1.1 ]] || fail 'public IP fallback'
+for TEST_HELPER_MODE in ip-http-failure private-ip mapped-private multicast scoped-ipv6 ip-injection ip-nul; do
+    export TEST_HELPER_MODE
+    expect_fail platform_public_ip
+    [[ ! -s $TEST_ROOT/failure.stdout ]] || fail 'unsafe IP printed'
+done
+# Bounded random selection retries state collisions and listeners; never selects <1024.
+openssl() {
+    [[ $* == 'rand -hex 2' ]] || return 1
+    case ${TEST_RANDOM_MODE:-normal} in
+        normal) printf '0000\n' ;;
+        collision) if [[ ! -e $TEST_HELPER_DIR/random-used ]]; then touch "$TEST_HELPER_DIR/random-used"; printf '0000\n'; else printf '0001\n'; fi ;;
+        exhausted) printf 'ffff\n' ;;
+        malformed) printf '0000;id\n' ;;
+        error) return 1 ;;
+    esac
+}
+TEST_LISTENER=none
+printf '{"nodes":[]}\n' > "$TEST_HELPER_DIR/state.json"
+[[ $(platform_random_port "$TEST_HELPER_DIR/state.json") == 1024 ]] || fail 'non-privileged random port'
+printf '{"nodes":[{"port":1024}]}\n' > "$TEST_HELPER_DIR/state.json"
+TEST_RANDOM_MODE=collision
+[[ $(platform_random_port "$TEST_HELPER_DIR/state.json") == 1025 ]] || fail 'state collision retry'
+for TEST_RANDOM_MODE in exhausted malformed error; do
+    expect_fail platform_random_port "$TEST_HELPER_DIR/state.json"
+    [[ ! -s $TEST_ROOT/failure.stdout ]] || fail 'bad random port printed'
+done
+TEST_RANDOM_MODE=normal
+printf '{"nodes":[{"port":true}]}\n' > "$TEST_HELPER_DIR/state.json"
+expect_fail platform_random_port "$TEST_HELPER_DIR/state.json"
+expect_fail platform_random_port "$TEST_HELPER_DIR/missing.json"
+printf '{"nodes":[]}\n' > "$TEST_HELPER_DIR/state.json"
+TEST_LISTENER=tcp
+expect_fail platform_random_port "$TEST_HELPER_DIR/state.json"
+printf 'PASS: platform matrix, isolation, archive integrity, sockets, release pagination/validation, public IP validation, bounded random selection\n'

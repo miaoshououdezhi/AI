@@ -345,3 +345,167 @@ platform_health() {
         fi
     done <<< "$nodes"
 }
+
+# Read-only helpers for interactive setup. No release tag or network response is executed.
+platform_release_choices() (
+    local tmp page count total_started=$SECONDS remaining max_time=8
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/xray-manager-releases.XXXXXXXX") || return 1
+    trap 'rm -rf -- "$tmp"' EXIT
+    printf '[]\n' > "$tmp/records.json" || return 1
+    for page in 1 2 3 4 5; do
+        remaining=$((40 - (SECONDS - total_started)))
+        ((remaining > 0)) || { _platform_error '官方版本查询超时，请稍后重试。'; return 1; }
+        ((remaining >= max_time)) || max_time=$remaining
+        if ! curl --http1.1 --silent --show-error --fail --location --max-redirs 2 \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 3 --max-time "$max_time" --max-filesize 16777216 \
+            --limit-rate 4M --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output "$tmp/page.json" \
+            "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100&page=$page"; then
+            _platform_error '无法查询 Xray 官方版本（网络失败或 API 限流），请稍后重试。'; return 1
+        fi
+        count=$(python3 - "$tmp/page.json" "$tmp/records.json" <<'PYRELEASE'
+import datetime, json, pathlib, re, sys
+page, records = map(pathlib.Path, sys.argv[1:])
+try:
+    if page.stat().st_size > 16 * 1024 * 1024:
+        raise ValueError('API response exceeds size limit')
+    releases = json.loads(page.read_text(encoding='utf-8'))
+    if not isinstance(releases, list) or len(releases) > 100:
+        raise ValueError('API must return an array of at most 100 releases')
+    previous = json.loads(records.read_text(encoding='utf-8'))
+    seen = {r['tag'] for r in previous}
+    unsupported = False
+    for release in releases:
+        if not isinstance(release, dict) or type(release.get('draft')) is not bool:
+            raise ValueError('invalid release draft field')
+        if release['draft']:
+            continue
+        if type(release.get('prerelease')) is not bool:
+            raise ValueError('invalid release prerelease field')
+        tag, published = release.get('tag_name'), release.get('published_at')
+        if not isinstance(tag, str) or len(tag) > 64:
+            raise ValueError('invalid release tag field')
+        if not isinstance(published, str) or not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z', published):
+            raise ValueError('invalid published_at field')
+        datetime.datetime.strptime(published, '%Y-%m-%dT%H:%M:%SZ')
+        if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
+            unsupported = True
+            continue
+        if tag in seen:
+            continue
+        seen.add(tag)
+        previous.append({'channel': 'preview' if release['prerelease'] else 'stable', 'tag': tag, 'published': published})
+    if unsupported:
+        print('提示：已过滤不支持的版本标签；本脚本支持 v数字.数字.数字。', file=sys.stderr)
+    records.write_text(json.dumps(previous), encoding='utf-8')
+    print(len(releases))
+except Exception as e:
+    print('官方版本响应验证失败：' + str(e), file=sys.stderr)
+    sys.exit(1)
+PYRELEASE
+        ) || return 1
+        rm -f -- "$tmp/page.json" || return 1
+        if ((count < 100)); then
+            python3 - "$tmp/records.json" <<'PYCHOICES'
+import json, sys
+records = json.load(open(sys.argv[1], encoding='utf-8'))
+lines = []
+for channel in ('stable', 'preview'):
+    choices = sorted((r for r in records if r['channel'] == channel), key=lambda r: r['published'], reverse=True)[:2]
+    for r in choices:
+        lines.append('\t'.join((channel, r['tag'], r['published'])))
+if not lines:
+    print('官方版本列表没有可用的 v数字.数字.数字 版本。', file=sys.stderr)
+    sys.exit(1)
+print('\n'.join(lines))
+PYCHOICES
+            return $?
+        fi
+    done
+    _platform_error '官方版本列表超过查询上限，无法确认最新版本，请稍后重试。'
+    return 1
+)
+
+platform_public_ip() (
+    local tmp url address
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/xray-manager-address.XXXXXXXX") || return 1
+    trap 'rm -rf -- "$tmp"' EXIT
+    for url in https://api.ipify.org https://api64.ipify.org https://icanhazip.com; do
+        if ! curl --http1.1 --silent --fail --location --max-redirs 2 \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --connect-timeout 2 --max-time 5 --max-filesize 128 --limit-rate 128 \
+            --output "$tmp/address" "$url"; then
+            continue
+        fi
+        address=$(python3 - "$tmp/address" <<'PYADDRESS'
+import ipaddress, pathlib, re, sys
+try:
+    raw = pathlib.Path(sys.argv[1]).read_bytes()
+    if not raw or len(raw) > 128:
+        raise ValueError('invalid response length')
+    value = raw.decode('ascii').strip(' \t\r\n')
+    if not re.fullmatch(r'[0-9A-Fa-f:.]+', value):
+        raise ValueError('invalid IP characters')
+    address = ipaddress.ip_address(value)
+    if not address.is_global or address.is_multicast or address.is_reserved or address.is_unspecified or address.is_loopback or address.is_link_local:
+        raise ValueError('not a unicast public IP address')
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None and not address.ipv4_mapped.is_global:
+        raise ValueError('private mapped IPv4 address')
+    print(address.compressed)
+except Exception:
+    sys.exit(1)
+PYADDRESS
+        ) || continue
+        printf '%s\n' "$address"
+        return 0
+    done
+    _platform_error '无法检测有效公网 IPv4/IPv6，请手动填写地址或取消。'
+    return 1
+)
+
+# Optional explicit state path; by default inspect the active project state if installed.
+platform_random_port() (
+    local state=${1:-${XM_STATE:-${XM_ETC:-${XM_ROOT:-}/etc/xray-manager}/state.json}} used='' hex value port attempt
+    (($# <= 1)) || { _platform_error '随机端口最多接受一个状态文件参数。'; return 1; }
+    command -v ss >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || { _platform_error '随机端口需要 ss 和 openssl。'; return 1; }
+    if [[ -e $state || -L $state || $# -eq 1 ]]; then
+        [[ -f $state && -r $state && ! -L $state ]] || { _platform_error '无法安全读取节点状态，未生成随机端口。'; return 1; }
+        used=$(python3 - "$state" <<'PYPORTS'
+import json, pathlib, sys
+try:
+    p = pathlib.Path(sys.argv[1])
+    if p.stat().st_size > 16 * 1024 * 1024:
+        raise ValueError('state too large')
+    state = json.loads(p.read_text(encoding='utf-8'))
+    if not isinstance(state, dict) or not isinstance(state.get('nodes'), list):
+        raise ValueError('invalid state nodes')
+    ports = []
+    for node in state['nodes']:
+        if not isinstance(node, dict) or type(node.get('port')) is not int or not 1 <= node['port'] <= 65535:
+            raise ValueError('invalid state port')
+        ports.append(str(node['port']))
+    print(' '.join(ports))
+except Exception as e:
+    print('节点端口读取失败：' + str(e), file=sys.stderr)
+    sys.exit(1)
+PYPORTS
+        ) || return 1
+    fi
+    for ((attempt=0; attempt<64; attempt++)); do
+        hex=$(openssl rand -hex 2) || { _platform_error '随机数生成失败。'; return 1; }
+        [[ $hex =~ ^[0-9a-fA-F]{4}$ ]] || { _platform_error '随机数输出不合法。'; return 1; }
+        value=$((16#$hex))
+        # Rejection sampling avoids modulo bias over the 64512 non-privileged ports.
+        ((value < 64512)) || continue
+        port=$((1024 + value))
+        [[ " $used " != *" $port "* ]] || continue
+        if platform_port_available "$port" 2>/dev/null; then
+            printf '%s\n' "$port"
+            return 0
+        fi
+    done
+    _platform_error '尝试 64 次后未找到空闲端口，请手动填写。'
+    return 1
+)

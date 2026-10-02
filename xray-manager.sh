@@ -45,6 +45,7 @@ xray-manager — Xray 中文交互管理
   restore /绝对路径/备份.json     校验并恢复节点，保留当前核心版本，需确认
   uninstall                      停服务，删除本项目程序和节点，需确认
 
+菜单回车接受默认值，:q 取消；地址回车自动探测公网 IP。
 端口与地址由节点配置指定；首次安装不开放任何公网监听。
 CLI 返回：0 成功，1 操作失败，2 参数错误或取消；中断 130/143。
 证书私钥须允许 xray-manager 账户读取；Trojan 证书 SAN 应匹配地址。
@@ -260,74 +261,288 @@ xm_dispatch() {
     xm_temp_cleanup; xm_work_end; xm_unlock
     return "$result"
 }
+xm_menu_ready() {
+    # Check installation before requesting secrets/network defaults. Release the
+    # lock during human input; CLI mutation rechecks everything under its own lock.
+    xm_ready || { xm_unlock; return 1; }
+    xm_unlock
+}
+xm_menu_validate_field() {
+    local field=$1 value=$2 candidate
+    if [[ $field == port ]]; then
+        [[ $value =~ ^[1-9][0-9]{0,4}$ ]] || { xm_error '端口必须为 1..65535 整数，不接受前导零。'; return 1; }
+        candidate=$(jq -c --argjson port "$value" '.port=$port' <<< "$XM_MENU_NODE") || return 1
+    else
+        candidate=$(jq -c --arg field "$field" --arg value "$value" '.[$field]=$value' <<< "$XM_MENU_NODE") || return 1
+    fi
+    protocol_validate_node "$candidate" || return 1
+    if [[ $field == id ]]; then
+        jq -e --arg id "$value" '.nodes|all(.id!=$id)' "$XM_STATE" >/dev/null || { xm_error '该节点 ID 已存在，请重新输入。'; return 1; }
+    elif [[ $field == port ]]; then
+        jq -e --argjson port "$value" '.nodes|all(.port!=$port)' "$XM_STATE" >/dev/null && platform_port_available "$value" || {
+            xm_error '该端口已占用，请重新输入。'; return 1;
+        }
+    fi
+    XM_MENU_NODE=$candidate
+}
+xm_menu_field() {
+    local variable=$1 field=$2 prompt=$3 default=${4:-} display=${5:-${4:-}} XM_INPUT
+    while :; do
+        xm_read XM_INPUT "$prompt" "$default" "$display" || return 2
+        xm_menu_validate_field "$field" "$XM_INPUT" || continue
+        printf -v "$variable" '%s' "$XM_INPUT"
+        return 0
+    done
+}
+xm_menu_address() {
+    local variable=$1 XM_INPUT
+    while :; do
+        xm_read XM_INPUT '对外地址' '' '回车自动探测公网 IP；也可输入 IP/域名' || return 2
+        if [[ -z $XM_INPUT ]]; then
+            xm_info '正在探测公网地址…'
+            XM_INPUT=$(platform_public_ip) || { xm_error '公网地址探测失败，请手动输入 IP/域名，或 :q 取消。'; continue; }
+        fi
+        xm_menu_validate_field address "$XM_INPUT" || continue
+        printf -v "$variable" '%s' "$XM_INPUT"
+        xm_info "对外地址：$XM_INPUT"
+        return 0
+    done
+}
+xm_menu_certificate() {
+    local certificate=$1
+    # Preliminary per-file checks give immediate feedback. A complete Trojan
+    # node is still checked by protocol_new/validate before any state mutation.
+    printf '%s\0%s' "$certificate" "$XM_ADDRESS" | "${XM_PYTHON:-python3}" -c '
+import ipaddress,os,pwd,shlex,shutil,stat,subprocess,sys
+try:
+    path,address=sys.stdin.read().split("\0")
+    if not os.path.isabs(path) or not os.path.isfile(path) or os.path.islink(path): raise ValueError("证书须为普通绝对路径文件")
+    if os.stat(path).st_mode & 0o022: raise ValueError("证书不能被组或其他用户写入")
+    def check(args):
+        result=subprocess.run(["openssl"]+args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+        if result.returncode: raise ValueError("证书无效或已过期")
+        return result.stdout
+    check(["x509","-in",path,"-noout","-checkend","0"])
+    try: ipaddress.ip_address(address); flag="-checkip"
+    except ValueError: flag="-checkhost"
+    if b"does match certificate" not in check(["x509","-in",path,"-noout",flag,address]): raise ValueError("证书 SAN 与对外地址不匹配")
+    if os.geteuid()==0:
+        try: pwd.getpwnam("xray-manager")
+        except KeyError: pass
+        else:
+            cmd=["runuser","-u","xray-manager","--","test","-r",path] if shutil.which("runuser") else ["su","-s","/bin/sh","-c","test -r "+shlex.quote(path),"xray-manager"]
+            if subprocess.run(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode: raise ValueError("服务账户无法读取证书")
+except (ValueError,OSError) as error:
+    print("错误："+str(error),file=sys.stderr); sys.exit(1)
+'
+}
+xm_menu_password() {
+    local variable=$1 default=$2 XM_INPUT
+    while :; do
+        xm_read_secret XM_INPUT '节点密码/主密钥' "$default" || return 2
+        xm_menu_validate_field password "$XM_INPUT" || continue
+        printf -v "$variable" '%s' "$XM_INPUT"
+        return 0
+    done
+}
 xm_menu_add() {
     local XM_CHOICE XM_ID XM_NAME XM_PORT XM_ADDRESS XM_SNI XM_TARGET XM_CERT XM_KEY XM_PASSWORD
-    printf '\n添加节点\n  1 VLESS REALITY Vision\n  2 Trojan TLS（已有证书）\n  3 Shadowsocks 2022\n  0 返回\n' >&2
-    xm_read XM_CHOICE '选择' || return 2
-    case $XM_CHOICE in 0) return 0 ;; 1|2|3) ;; *) xm_error '选择无效。'; return 2 ;; esac
-    xm_read XM_ID '节点 ID（字母/数字/短横线）' || return 2
-    xm_read XM_NAME '显示名称' "$XM_ID" || return 2
-    xm_read XM_PORT '监听端口' '443' || return 2
-    xm_read XM_ADDRESS '服务器公网 IP 或域名（仅分享用）' || return 2
-    case $XM_CHOICE in
-        1)
-            xm_read XM_SNI 'REALITY SNI' 'www.cloudflare.com' || return 2
-            xm_read XM_TARGET 'REALITY 目标（域名:端口）' "${XM_SNI}:443" || return 2
-            xm_dispatch add vless-reality "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_SNI" "$XM_TARGET"
+    local XM_MENU_NODE XM_INPUT suffix prefix default_id default_name default_port default_password type attempts
+    xm_menu_ready || return 1
+    xm_ui_heading '添加节点'
+    xm_ui_item 1 'VLESS REALITY Vision'
+    xm_ui_item 2 'Trojan TLS（使用已有证书）'
+    xm_ui_item 3 'Shadowsocks 2022'
+    printf '\n' >&2; xm_ui_item 0 '返回'
+    xm_info '回车使用方括号中的默认值；任意字段输入 :q 取消。'
+    while :; do
+        xm_read XM_CHOICE '选择协议' '1' || return 2
+        case $XM_CHOICE in 0) return 0 ;; 1) type=vless-reality; prefix=REALITY; break ;; 2) type=trojan; prefix=Trojan; break ;; 3) type=shadowsocks; prefix=SS2022; break ;; *) xm_error '请输入 0..3。' ;; esac
+    done
+    default_id=
+    for ((attempts=0; attempts<16; attempts++)); do
+        suffix=$(openssl rand -hex 4) || return 1
+        default_id="node-$suffix"
+        jq -e --arg id "$default_id" '.nodes|all(.id!=$id)' "$XM_STATE" >/dev/null && break
+        default_id=
+    done
+    [[ -n $default_id ]] || { xm_error '随机 ID 生成失败，请重试。'; return 1; }
+    default_name="${prefix}-${suffix}"
+    default_port=$(platform_random_port "$XM_STATE") || { default_port=; xm_info '随机端口获取失败，请手动指定可用端口。'; }
+    # A valid synthetic SS node reuses the authoritative protocol checks for
+    # common fields. It does not create a listener or write any state.
+    XM_MENU_NODE=$(protocol_new shadowsocks "$default_id" "$default_name" "${default_port:-1024}" localhost) || return 1
+    printf '\n' >&2
+    xm_menu_field XM_ID id '节点 ID' "$default_id" || return 2
+    xm_menu_field XM_NAME name '显示名称' "$default_name" || return 2
+    xm_menu_field XM_PORT port '监听端口' "$default_port" "${default_port:-需手动输入；:q 取消}" || return 2
+    xm_menu_address XM_ADDRESS || return 2
+    case $type in
+        vless-reality)
+            XM_MENU_NODE=$(protocol_new "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" www.cloudflare.com www.cloudflare.com:443) || return 1
+            xm_menu_field XM_SNI sni 'REALITY SNI' 'www.cloudflare.com' || return 2
+            xm_menu_field XM_TARGET target 'REALITY 目标（域名:端口）' "${XM_SNI}:443" || return 2
+            xm_info 'UUID、REALITY 密钥与 ShortID 已随机生成，秘密保持隐藏。'
+            xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_SNI" "$XM_TARGET" "$(jq -r .uuid <<< "$XM_MENU_NODE")" "$(jq -r .private_key <<< "$XM_MENU_NODE")" "$(jq -r .public_key <<< "$XM_MENU_NODE")" "$(jq -r .short_id <<< "$XM_MENU_NODE")"
             ;;
-        2)
-            xm_info '证书 SAN 应匹配地址，服务账户须能读取私钥。'
-            xm_read XM_CERT '现有证书绝对路径' || return 2
-            xm_read XM_KEY '现有私钥绝对路径' || return 2
-            xm_read_secret XM_PASSWORD '节点密码' || return 2
-            if [[ -n $XM_PASSWORD ]]; then xm_dispatch add trojan "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_CERT" "$XM_KEY" "$XM_PASSWORD"; else xm_dispatch add trojan "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_CERT" "$XM_KEY"; fi
+        trojan)
+            xm_info '证书 SAN 应匹配对外地址，服务账户须能读取证书与私钥。'
+            while :; do
+                xm_read XM_CERT '证书绝对路径' '' '需提供已有证书；:q 取消' || return 2
+                xm_menu_certificate "$XM_CERT" && break
+            done
+            default_password=$(openssl rand -hex 24) || return 1
+            while :; do
+                xm_read XM_KEY '私钥绝对路径' '' '提供匹配私钥；:cert 重选证书；:q 取消' || return 2
+                if [[ $XM_KEY == :cert ]]; then
+                    while :; do
+                        xm_read XM_CERT '重新选择证书绝对路径' '' '需提供已有证书；:q 取消' || return 2
+                        xm_menu_certificate "$XM_CERT" && break
+                    done
+                    continue
+                fi
+                XM_MENU_NODE=$(protocol_new "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_CERT" "$XM_KEY" "$default_password") && break
+            done
+            xm_menu_password XM_PASSWORD "$default_password" || return 2
+            xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_CERT" "$XM_KEY" "$XM_PASSWORD"
             ;;
-        3)
-            xm_read_secret XM_PASSWORD 'Base64 主密钥' || return 2
-            if [[ -n $XM_PASSWORD ]]; then xm_dispatch add shadowsocks "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_PASSWORD"; else xm_dispatch add shadowsocks "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS"; fi
+        shadowsocks)
+            default_password=$(jq -r .password <<< "$XM_MENU_NODE") || return 1
+            xm_menu_password XM_PASSWORD "$default_password" || return 2
+            xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_PASSWORD"
             ;;
     esac
 }
+xm_menu_upgrade() {
+    local releases channel tag published extra XM_CHOICE XM_VERSION XM_CONFIRM current selected_label index category_count display_date
+    local -a tags=() labels=() dates=()
+    xm_menu_ready || return 1
+    current=$(jq -r .core_version "$XM_STATE") || return 1
+    xm_ui_heading '升级 Xray 核心'
+    xm_info "当前版本：$current"
+    xm_info '正在获取官方正式版与预览版…'
+    if releases=$(platform_release_choices); then
+        for selected_label in stable preview; do
+            category_count=0
+            while IFS=$'\t' read -r channel tag published extra; do
+                [[ $channel == "$selected_label" && $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && $published =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ && -z $extra ]] || continue
+                ((category_count < 2)) || continue
+                tags+=("$tag"); labels+=("$channel"); dates+=("$published")
+                category_count=$((category_count+1))
+            done <<< "$releases"
+        done
+    else
+        xm_error '版本列表获取失败，可手动输入版本或返回。'
+    fi
+    printf '\n' >&2
+    for ((index=0; index<${#tags[@]}; index++)); do
+        selected_label='正式版'; [[ ${labels[index]} != preview ]] || selected_label='预览版'
+        xm_ui_item "$((index+1))" "${tags[index]}  ·  $selected_label"
+        display_date=${dates[index]%Z}
+        printf '        发布：%s UTC\n\n' "${display_date/T/ }" >&2
+    done
+    xm_ui_item m '手动输入版本'
+    xm_ui_item 0 '返回'
+    while :; do
+        xm_read XM_CHOICE '选择版本' '0' || return 2
+        case $XM_CHOICE in
+            0) return 0 ;;
+            m|M)
+                while :; do
+                    xm_read XM_VERSION '目标版本（例 v26.3.27）' '' ':q 返回' || return 2
+                    xm_version_valid "$XM_VERSION" && break
+                done
+                selected_label='手动指定版本'; break ;;
+            *)
+                if [[ $XM_CHOICE =~ ^[1-9][0-9]{0,2}$ ]] && ((XM_CHOICE <= ${#tags[@]})); then
+                    index=$((XM_CHOICE-1)); XM_VERSION=${tags[index]}; selected_label='正式版'; [[ ${labels[index]} != preview ]] || selected_label='预览版'; break
+                fi
+                xm_error '请输入列表编号、m 或 0。'
+                ;;
+        esac
+    done
+    printf '\n' >&2
+    xm_info "将核心从 $current 升级到 $XM_VERSION（$selected_label）。"
+    xm_info '确认后才下载和切换核心；失败会按原有事务回退。'
+    xm_read XM_CONFIRM '确认升级？输入 yes，其他输入取消' 'no' || return 2
+    [[ $XM_CONFIRM == yes ]] || { xm_info '已取消升级。'; return 2; }
+    xm_dispatch upgrade "$XM_VERSION"
+}
 xm_menu_service() {
     local XM_CHOICE action
-    printf '\n服务操作\n  1 启动   2 停止   3 重启\n  4 状态   5 开机启动   6 取消开机启动\n  0 返回\n' >&2
-    xm_read XM_CHOICE '选择' || return 2
-    case $XM_CHOICE in 0) return 0 ;; 1) action=start ;; 2) action=stop ;; 3) action=restart ;; 4) action=status ;; 5) action=enable ;; 6) action=disable ;; *) xm_error '选择无效。'; return 2 ;; esac
+    xm_menu_ready || return 1
+    xm_ui_heading '服务操作'
+    xm_ui_item 1 '启动'; xm_ui_item 2 '停止'; xm_ui_item 3 '重启'
+    printf '\n' >&2
+    xm_ui_item 4 '状态'; xm_ui_item 5 '开机启动'; xm_ui_item 6 '取消开机启动'
+    printf '\n' >&2; xm_ui_item 0 '返回'
+    while :; do
+        xm_read XM_CHOICE '选择操作' '0' || return 2
+        case $XM_CHOICE in 0) return 0 ;; 1) action=start; break ;; 2) action=stop; break ;; 3) action=restart; break ;; 4) action=status; break ;; 5) action=enable; break ;; 6) action=disable; break ;; *) xm_error '请输入 0..6。' ;; esac
+    done
     xm_dispatch service "$action"
 }
+xm_menu_render() {
+    local version='未安装' count=0 status='未运行' width status_color=$XM_UI_YELLOW
+    width=$(xm_terminal_width)
+    if [[ -f $XM_STATE ]] && command -v jq >/dev/null 2>&1; then
+        # Never render untrusted state text as ANSI: version has a strict alphabet.
+        version=$(jq -r '.core_version | select(type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$XM_STATE" 2>/dev/null)
+        [[ -n $version ]] || version='状态异常'
+        count=$(jq '.nodes|length' "$XM_STATE" 2>/dev/null); [[ $count =~ ^[0-9]+$ ]] || count='?'
+        if platform_detect >/dev/null 2>&1 && xm_service_call status >/dev/null 2>&1; then status='运行中'; status_color=$XM_UI_GREEN; fi
+    fi
+    printf '\n' >&2
+    if [[ $width =~ ^[0-9]+$ && $width -lt 60 ]]; then printf '%sXray 管理%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; else printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  Xray 管理  ·  xray-manager\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; fi
+    printf '\n  核心 %s\n  节点 %s  ·  %s%s%s\n' "$version" "$count" "$status_color" "$status" "$XM_UI_RESET" >&2
+    if [[ $width =~ ^[0-9]+$ && $width -ge 60 ]]; then
+        printf '\n' >&2
+        printf '%s核心管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+        xm_ui_pair 1 '安装核心' 2 '选择版本并升级'; xm_ui_item 3 '核心回退'
+        printf '\n%s节点管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+        xm_ui_pair 4 '查看节点' 5 '添加节点'; xm_ui_pair 6 '删除节点' 7 '分享链接'
+        printf '\n%s运行维护%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+        xm_ui_pair 8 '服务操作' 9 '查看日志'; xm_ui_item 10 '运行诊断'
+        printf '\n%s数据管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+        xm_ui_pair 11 '备份状态' 12 '恢复状态'; xm_ui_item 13 '卸载管理器'
+    else
+        xm_ui_heading '核心管理'
+        xm_ui_item 1 '安装核心'; xm_ui_item 2 '选择版本并升级'; xm_ui_item 3 '核心回退'
+        xm_ui_heading '节点管理'
+        xm_ui_item 4 '查看节点'; xm_ui_item 5 '添加节点'; xm_ui_item 6 '删除节点'; xm_ui_item 7 '分享链接'
+        xm_ui_heading '运行维护'
+        xm_ui_item 8 '服务操作'; xm_ui_item 9 '查看日志'; xm_ui_item 10 '运行诊断'
+        xm_ui_heading '数据管理'
+        xm_ui_item 11 '备份状态'; xm_ui_item 12 '恢复状态'; xm_ui_item 13 '卸载管理器'
+    fi
+    printf '\n' >&2; xm_ui_item 0 '退出'
+    printf '\n' >&2
+}
 xm_menu() {
-    local XM_CHOICE XM_ID XM_VERSION XM_FILE version count status width
+    local XM_CHOICE XM_ID XM_FILE
     xm_require_root || return 1
+    xm_ui_init
     while :; do
-        version='未安装'; count=0; status='未运行'
-        if [[ -f $XM_STATE ]] && command -v jq >/dev/null 2>&1; then
-            version=$(jq -r '.core_version // "未知"' "$XM_STATE" 2>/dev/null)
-            count=$(jq '.nodes|length' "$XM_STATE" 2>/dev/null)
-            platform_detect >/dev/null 2>&1 && xm_service_call status >/dev/null 2>&1 && status='运行中'
-        fi
-        width=${COLUMNS:-80}
-        if [[ $width =~ ^[0-9]+$ && $width -lt 60 ]]; then printf '\n── Xray 管理 ──\n' >&2; else printf '\n────────────────────────────────────────\n  Xray 管理  |  xray-manager\n────────────────────────────────────────\n' >&2; fi
-        printf '核心 %s  ·  节点 %s  ·  %s\n\n' "$version" "$count" "$status" >&2
-        printf '核心管理\n  1 安装       2 升级       3 核心回退\n节点管理\n  4 列表       5 添加       6 删除       7 分享\n运行维护\n  8 服务       9 日志      10 诊断\n数据管理\n 11 备份      12 恢复      13 卸载\n\n  0 退出\n' >&2
-        xm_read XM_CHOICE '选择' || { xm_info '输入结束，已退出。'; return 0; }
+        xm_menu_render
+        xm_read XM_CHOICE '选择菜单编号' '0' || { xm_info '输入结束或已取消，已退出。'; return 0; }
         case $XM_CHOICE in
             0) return 0 ;;
             1) xm_dispatch install ;;
-            2) xm_read XM_VERSION '目标版本（例 v26.3.27）' && xm_dispatch upgrade "$XM_VERSION" ;;
+            2) xm_menu_upgrade ;;
             3) xm_dispatch rollback ;;
             4) xm_dispatch list ;;
             5) xm_menu_add ;;
-            6) xm_read XM_ID '删除节点 ID' && xm_dispatch delete "$XM_ID" ;;
-            7) xm_info '分享链接含客户端秘密，请勿公开。'; xm_read XM_ID '节点 ID' && xm_dispatch share "$XM_ID" ;;
+            6) xm_menu_ready && xm_read XM_ID '删除节点 ID' && xm_dispatch delete "$XM_ID" ;;
+            7) xm_menu_ready && { xm_info '分享链接含客户端秘密，请勿公开。'; xm_read XM_ID '节点 ID' && xm_dispatch share "$XM_ID"; } ;;
             8) xm_menu_service ;;
             9) xm_dispatch logs ;;
             10) xm_dispatch diagnose ;;
-            11) xm_read XM_FILE '备份绝对路径' && xm_dispatch backup "$XM_FILE" ;;
-            12) xm_read XM_FILE '备份绝对路径' && xm_dispatch restore "$XM_FILE" ;;
+            11) xm_menu_ready && xm_read XM_FILE '备份绝对路径' && xm_dispatch backup "$XM_FILE" ;;
+            12) xm_menu_ready && xm_read XM_FILE '备份绝对路径' && xm_dispatch restore "$XM_FILE" ;;
             13) xm_dispatch uninstall ;;
             *) xm_error '选择无效，请输入菜单编号。' ;;
         esac
-        # Do not clear the terminal or hide errors; EOF leaves immediately on the next prompt.
+        # Keep prior output visible; EOF exits on the next prompt without looping.
     done
 }
 xm_main() {

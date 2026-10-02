@@ -34,21 +34,64 @@ xm_confirm() {
     IFS= read -r reply || return 2
     [[ $reply == yes ]] || { xm_info '已取消。'; return 2; }
 }
+# Terminal styling is enabled only for interactive stderr. Any NO_COLOR presence
+# disables styling, including NO_COLOR=""; TERM=dumb is always plain text.
+# UI_GREEN/YELLOW are consumed by the entrypoint status renderer.
+export XM_UI_CYAN='' XM_UI_GREEN='' XM_UI_YELLOW='' XM_UI_BOLD='' XM_UI_RESET=''
+xm_ui_init() {
+    XM_UI_CYAN=; XM_UI_GREEN=; XM_UI_YELLOW=; XM_UI_BOLD=; XM_UI_RESET=
+    if [[ -t 2 && ! ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
+        XM_UI_CYAN=$'\033[36m'; XM_UI_GREEN=$'\033[32m'; XM_UI_YELLOW=$'\033[33m'
+        XM_UI_BOLD=$'\033[1m'; XM_UI_RESET=$'\033[0m'
+    fi
+}
+xm_terminal_width() {
+    local width=${COLUMNS:-} terminal_size
+    if [[ $width =~ ^[1-9][0-9]{0,3}$ ]]; then printf '%s\n' "$width"; return 0; fi
+    if [[ -t 2 ]] && terminal_size=$(stty size <&2 2>/dev/null) && [[ $terminal_size =~ ^[0-9]+[[:space:]]+([1-9][0-9]{0,3})$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    else
+        printf '80\n'
+    fi
+}
+xm_ui_heading() { printf '\n%s%s%s\n\n' "$XM_UI_CYAN" "$1" "$XM_UI_RESET" >&2; }
+xm_ui_item() { printf '  %s[%2s]%s  %s\n' "$XM_UI_BOLD" "$1" "$XM_UI_RESET" "$2" >&2; }
+xm_ui_pair() {
+    # Left labels are fixed four-character Chinese captions, followed by a
+    # generous column gap. User strings are never accepted as menu captions.
+    printf '  %s[%2s]%s  %s          %s[%2s]%s  %s\n' "$XM_UI_BOLD" "$1" "$XM_UI_RESET" "$2" "$XM_UI_BOLD" "$3" "$XM_UI_RESET" "$4" >&2
+}
+xm_input_safe() {
+    # read removes the newline; reject terminal control characters before using
+    # input in prompts or diagnostics. Protocol validation remains authoritative.
+    [[ ! $1 =~ [[:cntrl:]] ]]
+}
 xm_read() {
-    local variable=$1 prompt=$2 default=${3:-} reply
+    local variable=$1 prompt=$2 default=${3:-} display=${4:-${3:-}} reply
     [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
-    if [[ -n $default ]]; then printf '%s [%s]：' "$prompt" "$default" >&2; else printf '%s：' "$prompt" >&2; fi
-    IFS= read -r reply || return 2
-    [[ -n $reply ]] || reply=$default
-    printf -v "$variable" '%s' "$reply"
+    while :; do
+        if [[ -n $display ]]; then printf '%s [%s]：' "$prompt" "$display" >&2; else printf '%s：' "$prompt" >&2; fi
+        IFS= read -r reply || return 2
+        [[ $reply != :q ]] || { xm_info '已取消。'; return 2; }
+        if ! xm_input_safe "$reply"; then xm_error '输入不能含终端控制字符，请重新输入。'; continue; fi
+        [[ -n $reply ]] || reply=$default
+        printf -v "$variable" '%s' "$reply"
+        return 0
+    done
 }
 xm_read_secret() {
-    local variable=$1 prompt=$2 reply
+    local variable=$1 prompt=$2 default=${3:-} reply
     [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
-    printf '%s（留空自动生成）：' "$prompt" >&2
-    IFS= read -r -s reply || { printf '\n' >&2; return 2; }
-    printf '\n' >&2
-    printf -v "$variable" '%s' "$reply"
+    while :; do
+        printf '%s [回车使用随机默认值，隐藏]：' "$prompt" >&2
+        IFS= read -r -s reply || { printf '\n' >&2; return 2; }
+        printf '\n' >&2
+        [[ $reply != :q ]] || { xm_info '已取消。'; return 2; }
+        if ! xm_input_safe "$reply"; then xm_error '秘密不能含控制字符，请重新输入。'; continue; fi
+        [[ -n $reply ]] || reply=$default
+        printf -v "$variable" '%s' "$reply"
+        return 0
+    done
 }
 xm_lock() {
     [[ -z $XM_LOCK_FD ]] || return 0
