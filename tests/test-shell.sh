@@ -132,6 +132,7 @@ pass 'help, unknown command, and EOF handled'
 (
     # shellcheck disable=SC1090
     source "$REPO/lib/platform.sh"
+    # shellcheck disable=SC1090
     source <(sed -n '/^xm_uninstall() {/,/^}/p' "$REPO/xray-manager.sh")
     xm_ready() { return 0; }
     xm_confirm() { return 0; }

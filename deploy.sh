@@ -62,7 +62,7 @@ case "$ID:$VERSION_ID" in
 esac
 curl --http1.1 --fail --location --proto "=https" --proto-redir "=https" --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 \
   -o "$xray_tmp/project.tar.gz" \
-  https://github.com/miaoshououdezhi/AI/archive/c360e02ed8ba837865c7ad2f0ef0f4b3709b3ccc.tar.gz
+  https://github.com/miaoshououdezhi/AI/archive/54116cdb1c413ea028fc5d1996402a3874149912.tar.gz
 mkdir "$xray_tmp/project"
 tar -xzf "$xray_tmp/project.tar.gz" -C "$xray_tmp/project" --strip-components=1
 sh "$xray_tmp/project/install.sh"
