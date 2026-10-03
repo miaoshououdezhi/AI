@@ -142,5 +142,55 @@ pass 'help, unknown command, and EOF handled'
     ln -s "$ROOT/foreign-lib" "$XM_HOME/lib"
     if xm_uninstall; then fail 'uninstall accepted symlink ancestor'; fi
     [[ $(cat "$ROOT/foreign-lib/common.sh") == retain && ! -e $ROOT/service-touched ]] || fail 'uninstall crossed ownership boundary'
-)
+) || fail 'uninstall ancestor-symlink regression block failed'
 pass 'uninstall refuses ancestor symlink before service changes or deletion'
+
+# Legacy removal uses real state_apply transactions with the existing mock core
+# and service. Only the retired type discriminator is read; expired certs need
+# no protocol validator and are never accessed.
+(
+    # shellcheck disable=SC1090
+    source <(sed -n '/^xm_version_valid() /p; /^xm_usage_error() /p; /^xm_work_begin() {/,/^}/p; /^xm_work_end() {/,/^}/p; /^xm_retire_trojan() {/,/^}/p; /^xm_install() {/,/^}/p' "$REPO/xray-manager.sh") || fail 'migration helper loading'
+    export XM_WORK_DIR=
+    protocol_validate_node() { jq -e '.type=="shadowsocks" and (.id|type=="string") and (.port|type=="number")' <<< "$1" >/dev/null; }
+    xm_installed() { return 0; }
+    platform_detect() { return 0; }
+    platform_shortcut_preflight() { return 0; }
+    platform_dependencies() { return 0; }
+    platform_prepare() { return 0; }
+    platform_install_service() { return 0; }
+    platform_shortcut_install() { return 0; }
+    xm_install_code() { printf 'updated\n' > "$ROOT/migration-code"; }
+    make_legacy() {
+        jq -n '{schema_version:1,core_version:"v26.3.27",nodes:[{id:"keep",type:"shadowsocks",port:3443},{id:"retired",type:"trojan",port:2443,cert:"/expired/no-certificate",key:"/expired/no-key",password:"private-test-fixture"}]}' > "$XM_STATE"
+        protocol_generate "$XM_STATE" "$XM_CONFIG"
+        cp "$XM_STATE" "$ROOT/migration-old-state"
+        cp "$XM_CONFIG" "$ROOT/migration-old-config"
+    }
+    make_legacy
+    MOCK_RUNNING=1; MOCK_HEALTH_FAILURE=0
+    xm_install || fail 'retired node migration'
+    jq -e '.core_version=="v26.3.27" and (.nodes|length)==1 and .nodes[0].id=="keep"' "$XM_STATE" >/dev/null || fail 'migration removed supported nodes'
+    [[ $MOCK_RUNNING == 1 && -e $ROOT/migration-code ]] || fail 'migration running state/code order'
+    backups=("$XM_ETC"/trojan-retired-backup.*)
+    [[ ${#backups[@]} == 1 ]] || fail 'missing unique retirement backup'
+    cmp "${backups[0]}" "$ROOT/migration-old-state" || fail 'retirement backup not complete'
+    [[ $(stat -c %a "${backups[0]}") == 600 ]] || fail 'retirement backup not private'
+    xm_work_end; xm_unlock
+    rm -f "$ROOT/migration-code"
+    make_legacy
+    MOCK_RUNNING=1; MOCK_HEALTH_FAILURE=1
+    if xm_install; then fail 'migration health failure accepted'; fi
+    cmp "$XM_STATE" "$ROOT/migration-old-state" && cmp "$XM_CONFIG" "$ROOT/migration-old-config" || fail 'retirement rollback changed active files'
+    [[ $MOCK_RUNNING == 1 && ! -e $ROOT/migration-code ]] || fail 'failed migration updated code/stopped core'
+    xm_work_end; xm_unlock
+    backups=("$XM_ETC"/trojan-retired-backup.*)
+    [[ ${#backups[@]} == 2 ]] || fail 'retirement backup overwritten on retry'
+    jq '.nodes[1].type="unknown-engine"' "$ROOT/migration-old-state" > "$XM_STATE"
+    cp "$XM_STATE" "$ROOT/migration-unknown"
+    if xm_install; then fail 'unknown type silently retired'; fi
+    cmp "$XM_STATE" "$ROOT/migration-unknown" || fail 'unknown type mutated'
+    [[ ! -e $ROOT/migration-code ]] || fail 'unknown type updated code'
+    xm_work_end; xm_unlock
+) || fail 'retirement migration regression block failed'
+pass 'retirement validates supported nodes, preserves private original backup, rolls back health failure and refuses unknown type'

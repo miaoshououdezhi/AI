@@ -1,0 +1,3 @@
+#!/bin/sh
+# xray-manager-owned:1
+exec /bin/bash /opt/xray-manager/xray-manager.sh "$@"

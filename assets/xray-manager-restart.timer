@@ -1,0 +1,12 @@
+# xray-manager-owned:1
+[Unit]
+Description=Xray Manager daily core restart
+
+[Timer]
+OnCalendar=*-*-* @TIME@:00
+AccuracySec=1s
+Persistent=false
+Unit=xray-manager-restart.service
+
+[Install]
+WantedBy=timers.target

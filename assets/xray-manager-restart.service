@@ -1,0 +1,10 @@
+# xray-manager-owned:1
+[Unit]
+Description=Xray Manager scheduled core restart
+ConditionPathExists=/etc/xray-manager/state.json
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/xray-manager/xray-manager.sh scheduled-restart
+UMask=0077
+TimeoutStartSec=120

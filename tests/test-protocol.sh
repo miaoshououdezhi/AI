@@ -17,15 +17,7 @@ py=${XM_PYTHON:-python3}
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 reject() { if "$@" >/dev/null 2>&1; then fail '非法输入被接受'; fi; }
 
-# Certificate fixtures are temporary, never real credentials.
-openssl req -x509 -newkey rsa:2048 -nodes -keyout "$scratch/key.pem" -out "$scratch/cert.pem" -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' -days 2 >/dev/null 2>&1
-chmod 750 "$scratch"
-chmod 640 "$scratch/key.pem" "$scratch/cert.pem"
-if [[ $(id -u) == 0 ]] && getent group xray-manager >/dev/null 2>&1; then
-    chgrp xray-manager "$scratch" "$scratch/key.pem" "$scratch/cert.pem"
-fi
 protocol_new shadowsocks ss '节点 # / + ?' 24443 2001:db8::1 > "$scratch/ss.json"
-protocol_new trojan tj 'TLS fixture' 24444 localhost "$scratch/cert.pem" "$scratch/key.pem" > "$scratch/tj.json"
 reject protocol_new unknown node test 443 localhost
 reject protocol_new shadowsocks node test 0 localhost
 reject protocol_new shadowsocks node test 65536 localhost
@@ -36,28 +28,19 @@ reject protocol_new shadowsocks node test 443 localhost 'AAAAAAAAAAAAAAAAAAAAAA=
 reject protocol_validate_node '{"type":"shadowsocks"}'
 reject protocol_validate_node 'null'
 reject protocol_validate_node '[]'
+reject protocol_validate_node "$(jq '.type="unsupported"' "$scratch/ss.json")"
 reject protocol_validate_node "$(jq '.port=true' "$scratch/ss.json")"
 reject protocol_validate_node "$(jq '.port=443.5' "$scratch/ss.json")"
 reject protocol_validate_node "$(jq '.name="bad\nname"' "$scratch/ss.json")"
 reject protocol_validate_node "$(jq '.name="bad\u009bname"' "$scratch/ss.json")"
 reject protocol_validate_node "$(jq '.unknown="extra"' "$scratch/ss.json")"
-reject protocol_validate_node "$(jq '.address="wrong.example"' "$scratch/tj.json")"
-chmod 644 "$scratch/key.pem"
-reject protocol_validate_node "$(cat "$scratch/tj.json")"
-chmod 640 "$scratch/key.pem"
-ln -s "$scratch/key.pem" "$scratch/key-link.pem"
-reject protocol_validate_node "$(jq --arg key "$scratch/key-link.pem" '.key=$key' "$scratch/tj.json")"
-protocol_new trojan tj 'TLS fixture' 24444 localhost "$scratch/cert.pem" "$scratch/key.pem" '测试 p@ss/#?%=:+abc' > "$scratch/tj.json"
 protocol_share "$(cat "$scratch/ss.json")" > "$scratch/ss.uri"
-protocol_share "$(cat "$scratch/tj.json")" > "$scratch/tj.uri"
 "$py" - "$scratch" <<'PY'
 import json,pathlib,sys,urllib.parse
 p=pathlib.Path(sys.argv[1]); n=json.loads((p/'ss.json').read_text()); u=urllib.parse.urlsplit((p/'ss.uri').read_text().strip())
 assert u.hostname==n['address'] and u.port==n['port']
 assert urllib.parse.unquote(u.username)==n['method'] and urllib.parse.unquote(u.password)==n['password']
 assert urllib.parse.unquote(u.fragment)==n['name'] and '%3D' in u.netloc
-n=json.loads((p/'tj.json').read_text()); u=urllib.parse.urlsplit((p/'tj.uri').read_text().strip())
-assert urllib.parse.unquote(u.username)==n['password'] and 'allowInsecure' not in u.query
 PY
 jq -n '{schema_version:1,nodes:[]}' > "$scratch/empty.json"
 protocol_generate "$scratch/empty.json" "$scratch/empty-config.json"
@@ -76,12 +59,12 @@ if [[ $1 == -c && $2 == *'import errno,socket'* ]]; then printf '0.0.0.0\n'; els
 SH
 chmod 750 "$scratch/python-ipv4"
 export REAL_TEST_PYTHON=$py
-jq -n --slurpfile nodes "$scratch/tj.json" '{schema_version:1,nodes:$nodes}' > "$scratch/ipv4-state.json"
+jq -n --slurpfile nodes "$scratch/ss.json" '{schema_version:1,nodes:$nodes}' | jq '.nodes[0].address="127.0.0.1"' > "$scratch/ipv4-state.json"
 XM_PYTHON="$scratch/python-ipv4" protocol_generate "$scratch/ipv4-state.json" "$scratch/ipv4-config.json"
 jq -e '.inbounds[0].listen=="0.0.0.0"' "$scratch/ipv4-config.json" >/dev/null
 jq -n --slurpfile nodes "$scratch/ss.json" '{schema_version:1,nodes:$nodes}' > "$scratch/ipv6-state.json"
 reject env XM_PYTHON="$scratch/python-ipv4" REAL_TEST_PYTHON="$py" bash -c 'source "$1/lib/protocol.sh"; protocol_generate "$2" "$3"' _ "$repo" "$scratch/ipv6-state.json" "$scratch/invalid-config.json"
-printf 'PASS protocol validation, certificate identity, permissions, URI encoding, empty config\n'
+printf 'PASS protocol validation, URI encoding, empty config\n'
 
 if [[ -z $core || ! -x $core ]]; then
     [[ ${1:-} != --e2e ]] || fail '--e2e 需要 XRAY_BIN'
@@ -102,7 +85,7 @@ p=pathlib.Path(sys.argv[1]); n=json.loads((p/'vl.json').read_text()); raw=(p/'vl
 assert n['private_key'] not in raw and query['pbk']==[n['public_key']] and query['sid']==[n['short_id']]
 assert query['flow']==['xtls-rprx-vision'] and query['type']==['tcp']
 PY
-jq -n --slurpfile ss "$scratch/ss.json" --slurpfile tj "$scratch/tj.json" --slurpfile vl "$scratch/vl.json" '{schema_version:1,core_version:"v26.3.27",nodes:[$ss[0],$tj[0],$vl[0]]}' > "$scratch/state.json"
+jq -n --slurpfile ss "$scratch/ss.json" --slurpfile vl "$scratch/vl.json" '{schema_version:1,core_version:"v26.3.27",nodes:[$ss[0],$vl[0]]}' > "$scratch/state.json"
 protocol_generate "$scratch/state.json" "$scratch/server.json"
 "$core" run -test -config "$scratch/empty-config.json"
 "$core" run -test -config "$scratch/server.json"
@@ -112,30 +95,27 @@ kill -0 "$server_pid" || { cat "$scratch/empty-runtime.log" >&2; fail '空节点
 kill "$server_pid"
 wait "$server_pid" || true
 server_pid=
-printf 'PASS native config: empty + VLESS REALITY Vision/Trojan/SS2022\n'
+printf 'PASS native config: empty + VLESS REALITY Vision/SS2022\n'
 [[ ${1:-} == --e2e ]] || exit 0
 
-# Random loopback ports avoid disturbing installed services. Clients keep TLS
-# verification enabled and trust only the generated test certificate.
+# Random loopback ports avoid disturbing installed services. Clients retain REALITY
+# authentication; the response HTTPS certificate is checked by curl.
 "$py" - "$scratch" <<'PY'
 import json,os,pathlib,socket,sys
 p=pathlib.Path(sys.argv[1]); cfg=json.loads((p/'server.json').read_text()); sockets=[]; ports=[]
-for _ in range(6):
+for _ in range(4):
     s=socket.socket(); s.bind(('127.0.0.1',0)); sockets.append(s); ports.append(s.getsockname()[1])
 state=json.loads((p/'state.json').read_text()); client={'log':{'loglevel':'warning'},'inbounds':[],'outbounds':[],'routing':{'rules':[]}}
 debug=os.environ.get('XM_E2E_DEBUG')=='1'
 if debug:
     cfg['log']['loglevel']='debug'; cfg['log'].pop('access',None); client['log']['loglevel']='debug'
 for i,n in enumerate(state['nodes']):
-    server_port=ports[i]; local_port=ports[i+3]; cfg['inbounds'][i]['listen']='127.0.0.1'; cfg['inbounds'][i]['port']=server_port
+    server_port=ports[i]; local_port=ports[i+2]; cfg['inbounds'][i]['listen']='127.0.0.1'; cfg['inbounds'][i]['port']=server_port
     in_tag='socks-'+n['id']; out_tag='proxy-'+n['id']
     client['inbounds'].append({'tag':in_tag,'listen':'127.0.0.1','port':local_port,'protocol':'socks','settings':{'auth':'noauth','udp':False}})
-    out={'tag':out_tag,'protocol':'shadowsocks' if n['type']=='shadowsocks' else ('vless' if n['type']=='vless-reality' else 'trojan')}
-    user={'password':n['password']} if n['type']!='vless-reality' else {'id':n['uuid'],'encryption':'none','flow':'xtls-rprx-vision'}
+    out={'tag':out_tag,'protocol':'shadowsocks' if n['type']=='shadowsocks' else 'vless'}
+    user={'password':n['password']} if n['type']=='shadowsocks' else {'id':n['uuid'],'encryption':'none','flow':'xtls-rprx-vision'}
     if n['type']=='shadowsocks': out['settings']={'servers':[{'address':'127.0.0.1','port':server_port,'method':n['method'],'password':n['password']}]}
-    elif n['type']=='trojan':
-        out['settings']={'servers':[{'address':'127.0.0.1','port':server_port,'password':n['password']}]}
-        out['streamSettings']={'network':'raw','security':'tls','tlsSettings':{'serverName':'localhost','allowInsecure':False,'certificates':[{'certificateFile':n['cert'],'usage':'verify'}]}}
     else:
         out['settings']={'vnext':[{'address':'127.0.0.1','port':server_port,'users':[user]}]}
         out['streamSettings']={'network':'raw','security':'reality','realitySettings':{'serverName':n['sni'],'fingerprint':'chrome','password':n['public_key'],'shortId':n['short_id']}}
@@ -143,7 +123,7 @@ for i,n in enumerate(state['nodes']):
             cfg['inbounds'][i]['streamSettings']['realitySettings']['show']=True
             out['streamSettings']['realitySettings']['show']=True
     client['outbounds'].append(out); client['routing']['rules'].append({'type':'field','inboundTag':[in_tag],'outboundTag':out_tag})
-(p/'server.json').write_text(json.dumps(cfg)); (p/'client.json').write_text(json.dumps(client)); (p/'ports').write_text('\n'.join(map(str,ports[3:]))+'\n')
+(p/'server.json').write_text(json.dumps(cfg)); (p/'client.json').write_text(json.dumps(client)); (p/'ports').write_text('\n'.join(map(str,ports[2:]))+'\n')
 for s in sockets:s.close()
 PY
 "$core" run -test -config "$scratch/client.json"

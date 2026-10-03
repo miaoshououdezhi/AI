@@ -27,7 +27,7 @@ apt-get update && apt-get install -y wget ca-certificates
 apk add --no-cache wget ca-certificates
 ```
 
-远程安装入口固定下载已通过验证的项目提交。安装结束后，执行 `bash /opt/xray-manager/xray-manager.sh` 进入中文菜单。重复部署保留已有节点和核心；首次安装没有公网节点。
+远程安装入口固定下载已通过验证的项目提交。安装结束后，执行 `xy` 进入中文菜单。也可以使用 `bash /opt/xray-manager/xray-manager.sh`。重复部署保留当前支持的节点和核心；首次安装没有公网节点。
 
 ### 下载仓库后安装
 
@@ -39,11 +39,11 @@ cd AI
 sh install.sh
 ```
 
-Alpine 默认没有 Bash 时，`install.sh` 会安装它；随后自动准备依赖、专用服务账户、目录、校验后的核心与开机服务。需要可访问 GitHub 官方发行资源。已安装的服务器再次执行安装会保留现有节点和核心。
+Alpine 默认没有 Bash 时，`install.sh` 会安装它；随后自动准备依赖、专用服务账户、目录、校验后的核心与开机服务。需要可访问 GitHub 官方发行资源。已安装的服务器再次执行安装会保留当前支持的节点和核心。
 
 ```sh
 # 中文交互菜单
-bash /opt/xray-manager/xray-manager.sh
+xy
 
 # 命令帮助，不需要 root
 bash xray-manager.sh help
@@ -51,6 +51,8 @@ bash xray-manager.sh help
 # 安装另一个明确版本
 sh install.sh v26.3.27
 ```
+
+安装会提供全局 `xy` 命令，直接输入 `xy` 打开菜单，也可用 `xy help`、`xy list` 等命令参数；管理操作需要 root。现存陌生 `/usr/local/bin/xy` 不会被覆盖，会在项目状态变更前拒绝并提示冲突。
 
 首次安装不创建公网监听，服务配置没有入站节点。添加节点后才会使用所选端口；网络防火墙和云安全组需按实际网络环境配置。程序不会更改 SSH、全局 DNS 或系统防火墙。
 
@@ -65,27 +67,27 @@ sh install.sh v26.3.27
   节点 0  ·  运行中
 
 核心管理
-  [ 1]  安装核心          [ 2]  选择版本并升级
-  [ 3]  核心回退
+[1]  安装核心        [2]  选择版本并升级
+[3]  核心回退
 
 节点管理
-  [ 4]  查看节点          [ 5]  添加节点
-  [ 6]  删除节点          [ 7]  分享链接
+[4]  查看节点        [5]  添加节点
+[6]  删除节点        [7]  分享链接
 
 运行维护
-  [ 8]  服务操作          [ 9]  查看日志
-  [10]  运行诊断
+[8]  服务操作        [9]  查看日志
+[10]  运行诊断
 
 数据管理
-  [11]  备份状态          [12]  恢复状态
-  [13]  卸载管理器
+[11]  备份状态        [12]  恢复状态
+[13]  卸载管理器
 
-  [ 0]  退出
+[0]  退出
 ```
 
-输入 `0` 返回或退出，任意输入字段用 `:q` 取消。提示中的方括号显示默认值，按回车直接使用；无默认值的必填字段会提示补填。菜单保留此前输出和错误；关闭标准输入会及时退出。删除、恢复、卸载要求输入 `yes`，CLI 自动化使用命令前的 `--yes`。
+输入 `0` 返回或退出，任意输入字段用 `:q` 取消。提示中的方括号显示默认值，按回车直接使用；无默认值的必填字段会提示补填。菜单保留此前输出和错误；关闭标准输入会及时退出。删除、恢复、卸载要求输入 `y` 或 `yes`（不区分大小写），CLI 自动化使用命令前的 `--yes`。
 
-添加节点时逐字段验证，输入不合法会留在当前字段重新提示。默认项如下：
+添加节点时逐字段验证，输入不合法会留在当前字段重新提示。每次新建重新生成随机 ID、名称、端口、密钥和 XHTTP 路径，并校验与已有节点的冲突；默认项如下：
 
 | 字段 | 回车行为 |
 |---|---|
@@ -96,33 +98,35 @@ sh install.sh v26.3.27
 | 对外地址 | 自动探测公网 IP；也可手动填写 IP 或域名 |
 | REALITY SNI / 目标 | `www.cloudflare.com` / 所填 SNI 的 443 端口 |
 | UUID、REALITY 密钥、ShortID | 自动随机生成，保持隐藏 |
-| Trojan 密码 / SS2022 主密钥 | 使用随机默认值，输入隐藏 |
-| Trojan 证书、私钥 | 必须提供已有绝对路径；私钥步骤可输入 `:cert` 重选证书 |
+| SS2022 主密钥 | 使用随机默认值，输入隐藏 |
+| XHTTP 路径 / 模式 | 随机 `/` 加 16 位十六进制路径 / `packet-up` |
+
+查看、分享和删除节点先展示带编号的列表，显示名称、类型（`reality`、`xhttp`、`ss2022`）、地址与端口。输入对应编号操作；查看隐藏凭据，分享仅输出选中节点链接，删除显示摘要并确认。列表展示后节点信息发生变化会拒绝操作，需重新选择。重点字段使用颜色，纯文本输出仍可识别。
 
 公网探测或随机端口获取失败时，保留手动输入及取消选项。地址探测结果用于客户端分享，不更改监听方式。添加前检查安装状态，实际写入前再次按既有协议校验和事务执行。秘密不会自动明文显示；只有明确选择“分享”才输出客户端链接。
 
-菜单升级展示官方 GitHub 正式版、预览版各最近两项及 UTC 发布时间，实际缺少的频道不会补造版本。选择版本后显示当前与目标版本，必须再输入 `yes` 才执行下载与切换；回车默认取消。版本查询失败仍可选 `m` 手动输入或 `0` 返回，手动版本格式错误会重新提示。
+菜单升级展示官方 GitHub 正式版、预览版各最近两项及 UTC 发布时间，实际缺少的频道不会补造版本。选择版本后显示当前与目标版本，必须再输入 `y` 或 `yes`（不区分大小写） 才执行下载与切换；回车默认取消。版本查询失败仍可选 `m` 手动输入或 `0` 返回，手动版本格式错误会重新提示。
 
 ## 配置节点
 
-支持 VLESS REALITY Vision、使用已有证书的 Trojan TLS、Shadowsocks 2022。每个节点使用独立 ID 和端口；相同端口不可重复。
+新增支持 VLESS REALITY Vision、VLESS XHTTP + REALITY、Shadowsocks 2022。Trojan 已完整移除；升级本管理脚本时，会先私密备份原状态，再清退已有 Trojan 节点，其余节点保留。清退不要求旧证书仍有效。每个节点使用独立 ID 和端口；相同端口不可重复。
 
 ```sh
 # 替换为自己的服务器地址和 REALITY 目标；密钥/UUID/ShortID 自动生成
-bash /opt/xray-manager/xray-manager.sh add vless-reality node-a '我的 REALITY' 1443 server.example.com www.cloudflare.com www.cloudflare.com:443
+xy add vless-reality node-a '我的 REALITY' 1443 server.example.com www.cloudflare.com www.cloudflare.com:443
 
-# 证书须有效且 SAN 匹配对外域名；服务用户须能读取证书及私钥
-bash /opt/xray-manager/xray-manager.sh add trojan node-b '我的 TLS' 2443 server.example.com /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
+# XHTTP 使用 REALITY 安全层，无须证书；路径请使用不同随机字符串
+xy add vless-xhttp node-b '我的 XHTTP' 2443 server.example.com www.cloudflare.com www.cloudflare.com:443 /a7d390ef52c1068b packet-up
 
 # 使用 2022-blake3-aes-128-gcm，自动生成随机主密钥
-bash /opt/xray-manager/xray-manager.sh add shadowsocks node-c '我的 SS2022' 3443 server.example.com
+xy add shadowsocks node-c '我的 SS2022' 3443 server.example.com
 
-bash /opt/xray-manager/xray-manager.sh list
-bash /opt/xray-manager/xray-manager.sh share node-a
-bash /opt/xray-manager/xray-manager.sh --yes delete node-c
+xy list
+xy share node-a
+xy --yes delete node-c
 ```
 
-Trojan 私钥建议 `root:xray-manager`、`0640`，其父目录允许该账户穿越。现有证书应放在受管目录以外，例如 `/etc/ssl/xray/`；脚本不会申请、续期或改写它们。REALITY 目标由使用者选择，目标 TLS 服务需与 SNI 相容。
+REALITY 目标由使用者选择，目标 TLS 服务需与 SNI 相容。
 
 交互菜单输入密码时隐藏字符。CLI 可传入密码，但会出现在调用者的 shell 历史或进程参数中，日常优先用菜单自动生成。生产配置关闭访问日志，仅保留警告和错误；日志轮转是周期检查，并非即时硬大小上限。分享链接和 JSON 备份包含客户端秘密；服务端 REALITY 私钥不会进入分享链接。
 
@@ -131,20 +135,29 @@ Trojan 私钥建议 `root:xray-manager`、`0640`，其父目录允许该账户�
 ## 服务、升级与数据
 
 ```sh
-bash /opt/xray-manager/xray-manager.sh service status
-bash /opt/xray-manager/xray-manager.sh service restart
-bash /opt/xray-manager/xray-manager.sh logs 80
-bash /opt/xray-manager/xray-manager.sh diagnose
+xy service status
+xy service restart
+
+# 每日按 VPS 本机时区重启正在运行的核心；停止则跳过，不补执行
+xy schedule status
+xy --yes schedule set 04:00
+xy --yes schedule disable
+xy logs 80
+xy diagnose
 
 # 升级版本必须实际存在于 XTLS/Xray-core 官方 release
-bash /opt/xray-manager/xray-manager.sh upgrade v26.3.27
-bash /opt/xray-manager/xray-manager.sh rollback
+xy upgrade v26.3.27
+xy rollback
 
 # 备份目标必须不存在；备份目录需预先建立
-bash /opt/xray-manager/xray-manager.sh backup /root/xray-backup.json
-bash /opt/xray-manager/xray-manager.sh --yes restore /root/xray-backup.json
-bash /opt/xray-manager/xray-manager.sh --yes uninstall
+xy backup /root/xray-backup.json
+xy --yes restore /root/xray-backup.json
+xy --yes uninstall
 ```
+
+服务菜单的 `[7] 定时重启核心` 可查看状态、设置每日 `HH:MM`（默认 `04:00`）或禁用；时间为 24 小时格式 `00:00..23:59`。确认支持 `y`/`yes` 的任意大小写，回车或其他输入取消。任务按机器本机时区执行，只重启运行中的核心；机器错过执行时刻不会补执行，启用时恰好处于指定分钟也不会立即补跑。首次安装默认关闭，卸载会移除项目专属定时任务。Debian 使用项目专属 systemd timer，Alpine 使用项目专属 OpenRC Python 调度服务；不修改全局 crontab。
+
+升级管理脚本发现旧 Trojan 节点时，先验证状态结构并拒绝未知类型，再校验过滤后的配置，保存 `/etc/xray-manager/trojan-retired-backup.XXXXXXXX` 完整原状态（`0600`），原生配置和服务事务切换成功后才更新已安装脚本。失败保留旧运行状态及已安装代码，备份保留。备份含秘密，卸载不会删除；新版不能恢复含已移除类型的旧备份，应仅提取仍支持的节点另行恢复。
 
 所有变更由 `flock` 互斥。脚本先验证 JSON 和协议结构，再调用候选核心 `xray run -test`，随后在同一文件系统中原子替换文件。重启或健康检查失败会恢复旧状态、配置、核心和运行状态；原来停止的服务在更新配置后仍保持停止。
 
@@ -183,7 +196,7 @@ bash tests/test-platform.sh
 bash tests/test-protocol.sh
 ```
 
-`test-interactive.sh` 使用真实协议校验、模拟外部查询及真实 PTY，覆盖回车默认值、字段重提示、查询失败手动回退、取消/EOF、升级二次确认以及颜色降级。
+`test-interactive.sh` 使用真实协议校验、模拟外部查询及真实 PTY，覆盖回车随机默认值、XHTTP、字段重提示、编号选择及列表变化保护、查询失败手动回退、取消/EOF、大小写确认、定时重启输入与停止核心跳过、升级二次确认以及颜色降级。
 
 `test-shell.sh` 使用隔离临时目录与模拟服务，覆盖锁冲突、原生校验失败、启动/健康失败、核心切换回退及历史版本元数据写失败。`XM_ROOT` 仅为隔离测试添加路径前缀，平台模块明确拒绝沙箱中对宿主账户、依赖和真实服务进行操作。
 

@@ -16,6 +16,8 @@ jobs:
           for file in xray-manager.sh lib/*.sh tests/*.sh; do bash -n "$file"; done
           sh -n install.sh
           sh -n deploy.sh
+          sh -n assets/xy
+          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("assets/xray-manager-restart.py").read_text())'
           shellcheck -x -S warning xray-manager.sh install.sh deploy.sh lib/*.sh tests/*.sh
       - name: Shell transactions
         run: bash tests/test-shell.sh
@@ -23,6 +25,10 @@ jobs:
         run: bash tests/test-interactive.sh
       - name: Platform tests
         run: bash tests/test-platform.sh
+      - name: Restart schedule transactions and daemon
+        run: bash tests/test-schedule.sh
+      - name: Global xy shortcut ownership
+        run: bash tests/test-shortcut.sh
       - name: Protocol tests
         run: bash tests/test-protocol.sh
   os-smoke:
@@ -51,6 +57,7 @@ jobs:
               printf "{\"schema_version\":1,\"core_version\":\"v26.3.27\",\"nodes\":[]}\n" > "$XM_ETC/state.json"
               protocol_generate "$XM_ETC/state.json" "$XM_ETC/config.json" || exit 1
               "$XM_BIN" run -test -config "$XM_ETC/config.json" || exit 1
+              XRAY_BIN="$XM_BIN" bash /src/tests/test-xhttp.sh || exit 1
             '\''
           '
 # Container jobs do not claim systemd/OpenRC boot or ARM64 service verification.

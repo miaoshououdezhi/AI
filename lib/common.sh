@@ -14,7 +14,7 @@ XM_TEMP_DIR=
 XM_LOCK_FD=
 XM_YES=0
 
-xm_error() { printf '错误：%s\n' "$*" >&2; }
+xm_error() { printf '%s错误：%s%s\n' "${XM_UI_YELLOW:-}" "$*" "${XM_UI_RESET:-}" >&2; }
 xm_info() { printf '%s\n' "$*" >&2; }
 xm_require_root() {
     if [[ -z $XM_ROOT && $EUID -ne 0 ]]; then xm_error '请使用 root 或 sudo 运行。'; return 1; fi
@@ -26,13 +26,14 @@ xm_need_commands() {
     local cmd
     for cmd in "$@"; do command -v "$cmd" >/dev/null 2>&1 || { xm_error "缺少命令：$cmd"; return 1; }; done
 }
+xm_yes() { [[ ${1,,} == y || ${1,,} == yes ]]; }
 xm_confirm() {
     local reply
     [[ $XM_YES == 1 ]] && return 0
     [[ -t 0 ]] || { xm_error '非交互模式需要 --yes 明确确认。'; return 2; }
-    printf '%s [输入 yes 确认]：' "$1" >&2
+    printf '%s [输入 y/yes 确认，不区分大小写]：' "$1" >&2
     IFS= read -r reply || return 2
-    [[ $reply == yes ]] || { xm_info '已取消。'; return 2; }
+    xm_yes "$reply" || { xm_info '已取消。'; return 2; }
 }
 # Terminal styling is enabled only for interactive stderr. Any NO_COLOR presence
 # disables styling, including NO_COLOR=""; TERM=dumb is always plain text.
@@ -55,11 +56,11 @@ xm_terminal_width() {
     fi
 }
 xm_ui_heading() { printf '\n%s%s%s\n\n' "$XM_UI_CYAN" "$1" "$XM_UI_RESET" >&2; }
-xm_ui_item() { printf '  %s[%2s]%s  %s\n' "$XM_UI_BOLD" "$1" "$XM_UI_RESET" "$2" >&2; }
+xm_ui_item() { printf '%s[%s]%s  %s\n' "$XM_UI_BOLD" "$1" "$XM_UI_RESET" "$2" >&2; }
 xm_ui_pair() {
     # Left labels are fixed four-character Chinese captions, followed by a
     # generous column gap. User strings are never accepted as menu captions.
-    printf '  %s[%2s]%s  %s          %s[%2s]%s  %s\n' "$XM_UI_BOLD" "$1" "$XM_UI_RESET" "$2" "$XM_UI_BOLD" "$3" "$XM_UI_RESET" "$4" >&2
+    printf '%s[%s]%s  %s          %s[%s]%s  %s\n' "$XM_UI_BOLD" "$1" "$XM_UI_RESET" "$2" "$XM_UI_BOLD" "$3" "$XM_UI_RESET" "$4" >&2
 }
 xm_input_safe() {
     # read removes the newline; reject terminal control characters before using
@@ -70,7 +71,7 @@ xm_read() {
     local variable=$1 prompt=$2 default=${3:-} display=${4:-${3:-}} reply
     [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
     while :; do
-        if [[ -n $display ]]; then printf '%s [%s]：' "$prompt" "$display" >&2; else printf '%s：' "$prompt" >&2; fi
+        if [[ -n $display ]]; then printf '%s%s%s [%s%s%s]：' "$XM_UI_CYAN" "$prompt" "$XM_UI_RESET" "$XM_UI_GREEN" "$display" "$XM_UI_RESET" >&2; else printf '%s：' "$prompt" >&2; fi
         IFS= read -r reply || return 2
         [[ $reply != :q ]] || { xm_info '已取消。'; return 2; }
         if ! xm_input_safe "$reply"; then xm_error '输入不能含终端控制字符，请重新输入。'; continue; fi

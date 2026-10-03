@@ -249,6 +249,8 @@ platform_install_service() {
 platform_remove_service() {
     _platform_init_available || return 1
     local service
+    platform_restart_schedule_preflight || return 1
+    platform_restart_schedule disable || return 1
     if [[ $XM_INIT == systemd ]]; then service=/etc/systemd/system/xray-manager.service; else service=/etc/init.d/xray-manager; fi
     _platform_check_service_file "$service" && _platform_check_service_file /etc/logrotate.d/xray-manager || return 1
     if [[ -e $service ]]; then
@@ -509,3 +511,272 @@ PYPORTS
     _platform_error '尝试 64 次后未找到空闲端口，请手动填写。'
     return 1
 )
+
+# Optional daily restart scheduler. All commands use fixed project names and paths.
+# Read status as: enabled|disabled<TAB>HH:MM|-<TAB>local timezone<TAB>next|-.
+_platform_schedule_time() { [[ ${1:-} =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; }
+_platform_schedule_files() {
+    printf '%s\n' "$XM_ETC/restart-schedule"
+    if [[ $XM_INIT == systemd ]]; then
+        printf '%s\n' /etc/systemd/system/xray-manager-restart.service /etc/systemd/system/xray-manager-restart.timer
+    else
+        printf '%s\n' /etc/init.d/xray-manager-restart
+    fi
+}
+_platform_schedule_link() {
+    local link target
+    if [[ $XM_INIT == systemd ]]; then
+        link=/etc/systemd/system/timers.target.wants/xray-manager-restart.timer
+        target=/etc/systemd/system/xray-manager-restart.timer
+    else
+        link=/etc/runlevels/default/xray-manager-restart
+        target=/etc/init.d/xray-manager-restart
+    fi
+    _platform_no_symlink "${link%/*}" || return 1
+    if [[ -e $link || -L $link ]]; then
+        [[ -L $link && $(readlink "$link") == "$target" ]] || { _platform_error "定时重启开机链接不属于本项目：$link"; return 1; }
+        _platform_owned_file "$target" || { _platform_error '定时重启开机链接缺少对应受管服务。'; return 1; }
+    fi
+}
+platform_restart_schedule_preflight() {
+    _platform_paths && _platform_init_available || return 1
+    local file dir
+    _platform_owned_dir "$XM_ETC" || { _platform_error '配置目录缺少所有权标记。'; return 1; }
+    while IFS= read -r file; do _platform_check_service_file "$file" || return 1; done < <(_platform_schedule_files)
+    _platform_schedule_link || return 1
+    if [[ $XM_INIT == systemd ]]; then
+        for dir in /usr/lib/systemd/system /lib/systemd/system /run/systemd/system; do
+            for file in xray-manager-restart.service xray-manager-restart.timer xray-manager-restart.service.d xray-manager-restart.timer.d; do
+                [[ ! -e $dir/$file && ! -L $dir/$file ]] || { _platform_error "发现其他位置的同名定时资源：$dir/$file"; return 1; }
+            done
+        done
+        for file in /etc/systemd/system/xray-manager-restart.service.d /etc/systemd/system/xray-manager-restart.timer.d; do
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "拒绝接管带外部覆盖配置的定时资源：$file"; return 1; }
+        done
+    else
+        _platform_schedule_openrc_overrides || return 1
+        _platform_schedule_pid_preflight || return 1
+        _platform_no_symlink "$XM_LOG/restart-schedule.log" || return 1
+        _platform_no_symlink "$XM_HOME/assets/xray-manager-restart.py" || return 1
+        if [[ -e $XM_HOME/assets/xray-manager-restart.py ]]; then
+            _platform_owned_file "$XM_HOME/assets/xray-manager-restart.py" || { _platform_error '定时调度程序不属于本项目。'; return 1; }
+        fi
+    fi
+}
+_platform_schedule_command() (
+    # A long-lived scheduler must never retain the manager's flock descriptor.
+    if [[ ${XM_LOCK_FD:-} =~ ^[0-9]+$ ]] && [[ -e /proc/self/fd/$XM_LOCK_FD ]]; then exec {XM_LOCK_FD}>&-; fi
+    unset TZ
+    "$@"
+)
+_platform_schedule_enabled() {
+    if [[ $XM_INIT == systemd ]]; then
+        systemctl is-enabled --quiet xray-manager-restart.timer
+    else
+        [[ -L /etc/runlevels/default/xray-manager-restart ]]
+    fi
+}
+_platform_schedule_running() {
+    if [[ $XM_INIT == systemd ]]; then
+        systemctl is-active --quiet xray-manager-restart.timer
+    else
+        rc-service xray-manager-restart status >/dev/null 2>&1
+    fi
+}
+_platform_schedule_control() {
+    local action=$1
+    if [[ $XM_INIT == systemd ]]; then
+        _platform_schedule_command systemctl "$action" xray-manager-restart.timer
+    else
+        case $action in
+            enable) _platform_schedule_command rc-update add xray-manager-restart default ;;
+            disable)
+                if _platform_schedule_enabled; then _platform_schedule_command rc-update del xray-manager-restart default; fi ;;
+            *) _platform_schedule_command rc-service xray-manager-restart "$action" ;;
+        esac
+    fi
+}
+_platform_schedule_read_time() {
+    local file=$XM_ETC/restart-schedule marker time
+    local extra
+    [[ -f $file && ! -L $file ]] || return 1
+    # shellcheck disable=SC2034
+    { IFS= read -r marker && IFS= read -r time && ! IFS= read -r extra; } < "$file" || return 1
+    [[ $marker == '# xray-manager-owned:1' ]] && _platform_schedule_time "$time" || return 1
+    printf '%s\n' "$time"
+}
+_platform_schedule_local_next() {
+    python3 - "${1:--}" <<'PYNEXT'
+import datetime, os, time, sys
+os.environ.pop('TZ', None)
+time.tzset()
+now = datetime.datetime.now().astimezone()
+zone = now.strftime('%Z %z')
+if sys.argv[1] == '-':
+    print(zone + '\t-')
+else:
+    hour, minute = map(int, sys.argv[1].split(':'))
+    # Local naive timestamp uses the machine's timezone/DST rules for that day.
+    local_now = datetime.datetime.now()
+    next_time = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if next_time <= local_now:
+        next_time += datetime.timedelta(days=1)
+    print(zone + '\t' + next_time.astimezone().strftime('%Y-%m-%d %H:%M:%S %Z'))
+PYNEXT
+}
+platform_restart_schedule() (
+    local action=${1:-} time=${2:-} file tmp old_enabled=0 old_running=0 index=0 result=0
+    case $action in
+        status|disable) (($# == 1)) || { _platform_error 'status/disable 不接受时间参数。'; return 2; } ;;
+        set) (($# == 2)) && _platform_schedule_time "$time" || { _platform_error '时间必须为 00:00..23:59，例如 04:00（每天，本机时区）。'; return 2; } ;;
+        *) _platform_error '定时重启操作为 status、set HH:MM 或 disable。'; return 2 ;;
+    esac
+    platform_restart_schedule_preflight || return 1
+    if [[ $action == status ]]; then
+        if [[ ! -e $XM_ETC/restart-schedule ]]; then
+            printf 'disabled\t-\t'; _platform_schedule_local_next -; return $?
+        fi
+        time=$(_platform_schedule_read_time) || { _platform_error '定时配置格式无效。'; return 1; }
+        if _platform_schedule_enabled && _platform_schedule_running; then
+            printf 'enabled\t%s\t' "$time"
+            if [[ $XM_INIT == systemd ]]; then
+                local zone next
+                zone=$(_platform_schedule_local_next -) || return 1
+                zone=${zone%%$'\t'*}
+                next=$(systemctl show --property=NextElapseUSecRealtime --value xray-manager-restart.timer) || return 1
+                [[ -n $next && $next != n/a ]] || next=-
+                printf '%s\t%s\n' "$zone" "$next"
+            else _platform_schedule_local_next "$time"; fi
+        else
+            printf 'disabled\t%s\t' "$time"; _platform_schedule_local_next -
+        fi
+        return $?
+    fi
+    if [[ $action == disable && ! -e $XM_ETC/restart-schedule ]]; then
+        local resources=0
+        while IFS= read -r file; do [[ ! -e $file ]] || resources=1; done < <(_platform_schedule_files)
+        if ((resources == 0)); then return 0; fi
+    fi
+    [[ -x $XM_HOME/xray-manager.sh ]] || { _platform_error '管理程序尚未安装。'; return 1; }
+    _platform_owned_file "$([[ $XM_INIT == systemd ]] && printf /etc/systemd/system/xray-manager.service || printf /etc/init.d/xray-manager)" || { _platform_error '请先安装本项目核心服务。'; return 1; }
+    if [[ $XM_INIT == openrc && $action == set ]]; then
+        [[ -f $XM_HOME/assets/xray-manager-restart.py ]] && _platform_owned_file "$XM_HOME/assets/xray-manager-restart.py" || { _platform_error '缺少本项目 Python 调度程序，请更新管理脚本。'; return 1; }
+        command -v python3 >/dev/null 2>&1 || { _platform_error '缺少 Python3 调度依赖。'; return 1; }
+    fi
+    tmp=$(umask 077; mktemp -d "$XM_ETC/.restart-schedule.XXXXXXXX") || return 1
+    trap 'rm -rf -- "$tmp"' EXIT
+    local -a files=()
+    while IFS= read -r file; do
+        files+=("$file")
+        if [[ -e $file ]]; then cp -p -- "$file" "$tmp/old-$index" || return 1; fi
+        index=$((index+1))
+    done < <(_platform_schedule_files)
+    _platform_schedule_enabled && old_enabled=1
+    _platform_schedule_running && old_running=1
+    _platform_schedule_restore() {
+        local i
+        _platform_schedule_running && _platform_schedule_control stop >/dev/null 2>&1 || true
+        _platform_schedule_enabled && _platform_schedule_control disable >/dev/null 2>&1 || true
+        for ((i=0; i<${#files[@]}; i++)); do
+            _platform_no_symlink "${files[i]}" || return 1
+            if [[ -e $tmp/old-$i ]]; then
+                _platform_install_owned "$tmp/old-$i" "${files[i]}" "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$tmp/old-$i")" || return 1
+            else rm -f -- "${files[i]}" || return 1; fi
+        done
+        [[ $XM_INIT != systemd ]] || _platform_schedule_command systemctl daemon-reload || return 1
+        ((old_enabled == 0)) || _platform_schedule_control enable || return 1
+        ((old_running == 0)) || _platform_schedule_control start || return 1
+    }
+    _platform_schedule_apply() {
+        ((old_running == 0)) || _platform_schedule_control stop || return 1
+        if [[ $action == disable ]]; then
+            ((old_enabled == 0)) || _platform_schedule_control disable || return 1
+            platform_restart_schedule_preflight || return 1
+            for file in "${files[@]}"; do rm -f -- "$file" || return 1; done
+
+        else
+            printf '# xray-manager-owned:1\n%s\n' "$time" > "$tmp/state" || return 1
+            _platform_install_owned "$tmp/state" "$XM_ETC/restart-schedule" 0600 || return 1
+            if [[ $XM_INIT == systemd ]]; then
+                sed "s/@TIME@/$time/" "$_XM_PLATFORM_ASSETS/xray-manager-restart.timer" > "$tmp/timer" || return 1
+                _platform_install_owned "$_XM_PLATFORM_ASSETS/xray-manager-restart.service" /etc/systemd/system/xray-manager-restart.service 0644 &&
+                    _platform_install_owned "$tmp/timer" /etc/systemd/system/xray-manager-restart.timer 0644 || return 1
+            else
+                _platform_install_owned "$_XM_PLATFORM_ASSETS/xray-manager-restart.openrc" /etc/init.d/xray-manager-restart 0755 || return 1
+            fi
+        fi
+        [[ $XM_INIT != systemd ]] || _platform_schedule_command systemctl daemon-reload || return 1
+        if [[ $action == set ]]; then
+            _platform_schedule_control enable && _platform_schedule_control start && _platform_schedule_running || return 1
+        fi
+    }
+    if ! _platform_schedule_apply; then
+        result=1
+        if _platform_schedule_restore; then _platform_error '定时重启修改失败，已恢复原配置和启停状态。'; else _platform_error '定时重启修改及恢复失败，请检查专属调度服务。'; fi
+    fi
+    return "$result"
+)
+
+# Global user entrypoint; XM_ROOT supports root-free filesystem isolation tests.
+platform_shortcut_preflight() {
+    _platform_paths || return 1
+    [[ -n ${XM_ROOT:-} ]] || _platform_root || return 1
+    local parent=${XM_ROOT:-}/usr/local/bin
+    _platform_no_symlink "$parent" || return 1
+    while [[ $parent != / && -n $parent ]]; do
+        [[ ! -e $parent || -d $parent ]] || { _platform_error "xy 入口父路径不是目录：$parent"; return 1; }
+        parent=${parent%/*}
+    done
+    _platform_check_service_file "${XM_ROOT:-}/usr/local/bin/xy"
+}
+platform_shortcut_install() {
+    platform_shortcut_preflight || return 1
+    local target=${XM_ROOT:-}/usr/local/bin/xy source=$_XM_PLATFORM_ASSETS/xy temp
+    _platform_owned_file "$source" || { _platform_error '缺少本项目 xy 入口模板。'; return 1; }
+    mkdir -p -- "${target%/*}" || return 1
+    _platform_no_symlink "${target%/*}" || return 1
+    if [[ -z ${XM_ROOT:-} ]]; then
+        _platform_install_owned "$source" "$target" 0755
+    else
+        temp=$(mktemp "${target%/*}/.xray-manager.XXXXXXXX") || return 1
+        if ! cp -- "$source" "$temp" || ! chmod 0755 "$temp" || ! mv -f -- "$temp" "$target"; then
+            rm -f -- "$temp"; return 1
+        fi
+    fi
+}
+platform_shortcut_remove() {
+    platform_shortcut_preflight || return 1
+    [[ ! -e ${XM_ROOT:-}/usr/local/bin/xy ]] || rm -f -- "${XM_ROOT:-}/usr/local/bin/xy"
+}
+
+# OpenRC loads service-specific conf.d overlays before every service operation.
+# Reject them rather than sourcing, overwriting or deleting externally owned code.
+_platform_schedule_openrc_overrides() {
+    local root=${1:-} dir file
+    for dir in /etc /usr/local/etc /usr/lib/rc /lib/rc; do
+        for file in "$root$dir/conf.d/xray-manager-restart" "$root$dir/conf.d/xray-manager-restart."*; do
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "定时服务存在外部 OpenRC 覆盖配置：$file"; return 1; }
+        done
+        if [[ $dir != /etc ]]; then
+            file=$root$dir/init.d/xray-manager-restart
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "其他 OpenRC 路径存在同名服务：$file"; return 1; }
+        fi
+    done
+    for file in "$root/etc/runlevels/"*/xray-manager-restart; do
+        [[ -e $file || -L $file ]] || continue
+        [[ $file == "$root/etc/runlevels/default/xray-manager-restart" ]] || { _platform_error "定时服务存在外部运行级别链接：$file"; return 1; }
+    done
+}
+
+
+# OpenRC supervise-daemon may create its pidfile before launching the scheduler.
+# Never allow that write to follow a symlink or replace an unclaimed runtime file.
+_platform_schedule_pid_preflight() {
+    local root=${1:-} pid
+    pid=$root/run/xray-manager-restart.pid
+    _platform_no_symlink "$pid" || return 1
+    if [[ -e $pid ]]; then
+        [[ -f $pid ]] || { _platform_error "定时服务 PID 路径不是普通文件：$pid"; return 1; }
+        _platform_owned_file "$root/etc/init.d/xray-manager-restart" || { _platform_error "定时服务 PID 文件没有对应受管服务，拒绝接管：$pid"; return 1; }
+    fi
+}

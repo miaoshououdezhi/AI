@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# xray-manager-owned:1
+# shellcheck shell=sh disable=SC2034
+description="Xray Manager private restart scheduler"
+supervisor="supervise-daemon"
+command="/usr/bin/python3"
+command_args="/opt/xray-manager/assets/xray-manager-restart.py"
+pidfile="/run/xray-manager-restart.pid"
+output_log="/var/log/xray-manager/restart-schedule.log"
+error_log="/var/log/xray-manager/restart-schedule.log"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+retry="TERM/155/KILL/5"
+umask=0077
+
+depend() {
+    need localmount
+    after clock
+}
+
+start_pre() {
+    [ ! -L "$pidfile" ] && { [ ! -e "$pidfile" ] || [ -f "$pidfile" ]; } || return 1
+    [ -f /etc/xray-manager/restart-schedule ] && [ ! -L /etc/xray-manager/restart-schedule ] || return 1
+    [ -f /opt/xray-manager/assets/xray-manager-restart.py ] && [ ! -L /opt/xray-manager/assets/xray-manager-restart.py ] || return 1
+    checkpath --file --owner root:root --mode 0600 "$output_log" || return 1
+}
