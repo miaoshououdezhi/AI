@@ -751,6 +751,8 @@ platform_shortcut_remove() {
 
 # OpenRC loads service-specific conf.d overlays before every service operation.
 # Reject them rather than sourcing, overwriting or deleting externally owned code.
+# Optional root is passed by isolated test fixtures in tests/test-schedule.sh.
+# shellcheck disable=SC2120
 _platform_schedule_openrc_overrides() {
     local root=${1:-} dir file
     for dir in /etc /usr/local/etc /usr/lib/rc /lib/rc; do
@@ -771,6 +773,8 @@ _platform_schedule_openrc_overrides() {
 
 # OpenRC supervise-daemon may create its pidfile before launching the scheduler.
 # Never allow that write to follow a symlink or replace an unclaimed runtime file.
+# Optional root is passed by isolated test fixtures in tests/test-schedule.sh.
+# shellcheck disable=SC2120
 _platform_schedule_pid_preflight() {
     local root=${1:-} pid
     pid=$root/run/xray-manager-restart.pid
