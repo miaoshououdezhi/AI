@@ -55,7 +55,7 @@ jobs:
           sudo tee rootfs/etc/systemd/system/vm-validation.service >/dev/null <<'UNIT'
           [Unit]
           Description=Private final F lifecycle validation
-          After=local-fs.target
+          After=local-fs.target multi-user.target
           [Service]
           Type=oneshot
           ExecStart=/bin/bash /root/ci-entry.sh
@@ -64,6 +64,17 @@ jobs:
           StandardError=tty
           TTYPath=/dev/ttyS0
           UNIT
+          # Docker metadata belongs to the build container, not the VM guest.
+          sudo rm -f rootfs/.dockerenv rootfs/run/.containerenv rootfs/run/systemd/container rootfs/etc/container_environment
+          sudo tee rootfs/etc/systemd/system/vm-validation.target >/dev/null <<'TARGET'
+          [Unit]
+          Description=Private VM validation boot target
+          Wants=multi-user.target
+          Requires=vm-validation.service
+          After=multi-user.target
+          AllowIsolate=yes
+          TARGET
+          sudo ln -sfn vm-validation.target rootfs/etc/systemd/system/default.target
           sudo sh -c ': > rootfs/etc/machine-id; rm -f rootfs/var/lib/dbus/machine-id; ln -s /etc/machine-id rootfs/var/lib/dbus/machine-id'
           sudo cp "$(find rootfs/boot -name 'vmlinuz-*' | sort -V | tail -1)" evidence/vmlinuz
           sudo cp "$(find rootfs/boot -name 'initrd.img-*' | sort -V | tail -1)" evidence/initrd
@@ -87,7 +98,7 @@ jobs:
           sudo timeout --signal=TERM --kill-after=30 3900 qemu-system-x86_64 \
             -m 2048 -smp 2 "${accel[@]}" -nographic -no-reboot \
             -kernel evidence/vmlinuz -initrd evidence/initrd \
-            -append 'root=/dev/vda rw console=ttyS0 systemd.unit=vm-validation.service net.ifnames=0 panic=30' \
+            -append 'root=/dev/vda rw console=ttyS0 systemd.unit=vm-validation.target net.ifnames=0 panic=30' \
             -drive file=evidence/debian.ext4,format=raw,if=virtio \
             -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
             2>&1 | tee evidence/serial.log

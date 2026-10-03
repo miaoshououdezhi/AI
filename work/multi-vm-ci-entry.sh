@@ -3,8 +3,22 @@ set -Eeuo pipefail
 exec > /dev/ttyS0 2>&1
 finish() { code=$?; if ((code!=0)); then systemctl status xray-manager xray-manager-extra -l --no-pager || true; journalctl -b -u xray-manager-extra -n 40 -l --no-pager || true; fi; printf 'MULTI_VM_CI_ENTRY_EXIT=%s\n' "$code"; sync; systemctl poweroff --force --force; }
 trap finish EXIT
+printf 'VM_ENTRY_STARTED; PID1='; cat /proc/1/comm
+printf 'VM_KERNEL_CMDLINE='; cat /proc/cmdline
+systemd-detect-virt || true
+if systemd-detect-virt --container --quiet; then
+  printf 'VM_ENVIRONMENT_ERROR=unexpected-container-detection\n'
+  exit 45
+fi
 mount -o remount,rw /
-ip link set eth0 up; ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2
+# This isolated VM has exactly one non-loopback NIC; tolerate udev renaming.
+mapfile -t nics < <(find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n' | awk '$0!="lo"')
+[[ ${#nics[@]} == 1 ]]
+nic=${nics[0]}
+printf 'VM_NIC=%s\n' "$nic"
+ip link set "$nic" up
+ip addr add 10.0.2.15/24 dev "$nic"
+ip route add default via 10.0.2.2
 printf 'nameserver 10.0.2.3\n' > /etc/resolv.conf
 journalctl --flush
 printf 'LIFECYCLE_PHASE=FRESH_INSTALL; PID1='; cat /proc/1/comm
