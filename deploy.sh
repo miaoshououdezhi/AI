@@ -27,7 +27,7 @@ trap "exit 143" TERM
 trap "exit 129" HUP
 curl --http1.1 --fail --location --proto "=https" --proto-redir "=https" --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 \
   -o "$xray_tmp/project.tar.gz" \
-  https://github.com/miaoshououdezhi/AI/archive/2eb980fab90c23df38c602203951e4be3ddafcb5.tar.gz
+  https://github.com/miaoshououdezhi/AI/archive/0ed62cef7c09daa29895b655a13285c183c81d56.tar.gz
 mkdir "$xray_tmp/project"
 tar -xzf "$xray_tmp/project.tar.gz" -C "$xray_tmp/project" --strip-components=1
 sh "$xray_tmp/project/install.sh"
