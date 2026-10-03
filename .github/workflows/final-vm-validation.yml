@@ -60,10 +60,24 @@ jobs:
           Type=oneshot
           ExecStart=/bin/bash /root/ci-entry.sh
           TimeoutStartSec=3600
-          StandardOutput=tty
-          StandardError=tty
-          TTYPath=/dev/ttyS0
+          StandardOutput=journal+console
+          StandardError=journal+console
+          ExecStopPost=/bin/bash /root/ci-stop-post.sh
           UNIT
+          sudo tee rootfs/root/ci-stop-post.sh >/dev/null <<'POST'
+          #!/bin/bash
+          set -u
+          exec > /dev/ttyS0 2>&1
+          printf 'VM_SERVICE_RESULT=%s EXIT_CODE=%s EXIT_STATUS=%s\n' "${SERVICE_RESULT:-unset}" "${EXIT_CODE:-unset}" "${EXIT_STATUS:-unset}"
+          journalctl -b -u vm-validation.service -u xray-manager -u xray-manager-extra -u xray-manager-restart.service -n 300 --no-pager || true
+          sync
+          systemctl poweroff --force --force
+          POST
+          sudo chmod 700 rootfs/root/ci-stop-post.sh
+          # Only fixture consoles are masked; project service definitions stay intact.
+          for unit in serial-getty@ttyS0.service console-getty.service getty@tty1.service; do
+            sudo ln -sfn /dev/null "rootfs/etc/systemd/system/$unit"
+          done
           # Docker metadata belongs to the build container, not the VM guest.
           sudo rm -f rootfs/.dockerenv rootfs/run/.containerenv rootfs/run/systemd/container rootfs/etc/container_environment
           sudo tee rootfs/etc/systemd/system/vm-validation.target >/dev/null <<'TARGET'
