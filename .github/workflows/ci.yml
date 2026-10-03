@@ -23,6 +23,8 @@ jobs:
         run: bash tests/test-shell.sh
       - name: Interactive defaults, validation and terminal styles
         run: bash tests/test-interactive.sh
+      - name: Node edits and state transactions
+        run: bash tests/test-edit.sh
       - name: Platform tests
         run: bash tests/test-platform.sh
       - name: Restart schedule transactions and daemon

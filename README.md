@@ -101,7 +101,7 @@ sh install.sh v26.3.27
 | SS2022 主密钥 | 使用随机默认值，输入隐藏 |
 | XHTTP 路径 / 模式 | 随机 `/` 加 16 位十六进制路径 / `packet-up` |
 
-查看、分享和删除节点先展示带编号的列表，显示名称、类型（`reality`、`xhttp`、`ss2022`）、地址与端口。输入对应编号操作；查看隐藏凭据，分享仅输出选中节点链接，删除显示摘要并确认。列表展示后节点信息发生变化会拒绝操作，需重新选择。重点字段使用颜色，纯文本输出仍可识别。
+查看、分享和删除节点先展示带编号的列表，显示名称、类型（`reality`、`xhttp`、`ss2022`）、地址与端口。输入对应编号操作；查看隐藏凭据，并提供“修改名称”和“修改节点配置”；分享仅输出选中节点链接，删除显示摘要并确认。列表展示后节点信息发生变化会拒绝操作，需重新选择。重点字段使用颜色，纯文本输出仍可识别。
 
 公网探测或随机端口获取失败时，保留手动输入及取消选项。地址探测结果用于客户端分享，不更改监听方式。添加前检查安装状态，实际写入前再次按既有协议校验和事务执行。秘密不会自动明文显示；只有明确选择“分享”才输出客户端链接。
 
@@ -131,6 +131,36 @@ REALITY 目标由使用者选择，目标 TLS 服务需与 SNI 相容。
 交互菜单输入密码时隐藏字符。CLI 可传入密码，但会出现在调用者的 shell 历史或进程参数中，日常优先用菜单自动生成。生产配置关闭访问日志，仅保留警告和错误；日志轮转是周期检查，并非即时硬大小上限。分享链接和 JSON 备份包含客户端秘密；服务端 REALITY 私钥不会进入分享链接。
 
 完整参数格式见 `help` 和 [协议说明](docs/protocols.md)。
+
+## 查看与修改节点
+
+选择主菜单 `[4] 查看节点`，先显示所有节点的编号、名称、类型、地址和端口；输入节点编号进入详情，再选择 `[1] 修改名称` 或 `[2] 修改节点配置`。配置菜单只展示当前协议支持的字段，ID 和协议类型固定。输入合法后显示摘要，再输入 `y`/`yes`（任意大小写）才保存；回车保留当前值，`:q` 或 EOF 取消。UUID、ShortID、密码和密钥的当前值保持隐藏。
+
+| 协议 | 可修改字段 |
+|---|---|
+| 全部 | 名称、监听端口、对外 IP/域名 |
+| REALITY / XHTTP | UUID、SNI、目标域名:端口、ShortID、公私钥 |
+| XHTTP | 路径、模式（auto/packet-up/stream-up/stream-one） |
+| SS2022 | 16 字节标准 Base64 主密钥 |
+
+REALITY 公私钥须成对填写并匹配，一次验证完整新密钥对；不会因旧另一半密钥而阻止合法替换。名称、端口、凭据和 XHTTP 路径须不与其他节点冲突；保留自己的原端口不会将自身监听误判为冲突，换端口则检查实际监听。输入期间不持锁，保存时重新检查选中节点的完整快照；若已被另一操作修改，会拒绝保存并提示重新选择。
+
+```sh
+xy edit node-a name '新的显示名称'
+xy edit node-a port 1444
+xy edit node-a address server.example.com
+xy edit node-a sni www.cloudflare.com
+xy edit node-a target www.cloudflare.com:443
+xy edit node-a short_id a4b7
+xy edit node-b path /new-random-path
+xy edit node-b mode packet-up
+# keys 字段须同时填写匹配的私钥和公钥；秘密会出现在 CLI 参数/历史中
+xy edit node-a keys PRIVATE_KEY PUBLIC_KEY
+# 自动化才使用 --yes，日常秘密编辑优先使用菜单
+xy --yes edit node-c name '新的 SS2022 名称'
+```
+
+CLI 格式为 `edit ID FIELD VALUE`；`keys` 例外接受私钥和公钥两个值，`shortid` 是 `short_id` 的别名。`uuid`、`password` 也可按上表使用。非法字段、格式、密钥匹配和跨协议字段会被拒绝。只替换所选节点，其余节点和核心保持；保存复用原生校验与服务健康事务，失败回退，原来停止的核心保持停止。没有变化时不写配置、不重启服务。
 
 ## 服务、升级与数据
 
@@ -192,11 +222,14 @@ sh -n install.sh
 shellcheck -x -S warning xray-manager.sh install.sh lib/*.sh tests/*.sh
 bash tests/test-shell.sh
 bash tests/test-interactive.sh
+bash tests/test-edit.sh
 bash tests/test-platform.sh
 bash tests/test-protocol.sh
 ```
 
 `test-interactive.sh` 使用真实协议校验、模拟外部查询及真实 PTY，覆盖回车随机默认值、XHTTP、字段重提示、编号选择及列表变化保护、查询失败手动回退、取消/EOF、大小写确认、定时重启输入与停止核心跳过、升级二次确认以及颜色降级。
+
+`test-edit.sh` 使用真实协议验证与状态事务、模拟核心执行和服务，覆盖三协议修改、成对密钥、字段/冲突拒绝、确认取消、快照并发和回退；它不冒充真实核心原生验证，真实核心校验另行执行。
 
 `test-shell.sh` 使用隔离临时目录与模拟服务，覆盖锁冲突、原生校验失败、启动/健康失败、核心切换回退及历史版本元数据写失败。`XM_ROOT` 仅为隔离测试添加路径前缀，平台模块明确拒绝沙箱中对宿主账户、依赖和真实服务进行操作。
 

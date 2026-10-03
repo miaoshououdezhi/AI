@@ -36,6 +36,7 @@ xray-manager — Xray 中文交互管理
   add vless-reality ID 名称 端口 地址 SNI TARGET [UUID 私钥 公钥 ShortID]
   add vless-xhttp ID 名称 端口 地址 SNI TARGET PATH MODE [UUID 私钥 公钥 ShortID]
   add shadowsocks ID 名称 端口 地址 [密码]
+  edit ID FIELD VALUE [公钥]      修改匹配协议的字段；keys 须私钥/公钥成对
   delete ID                      删除节点，需要确认或 --yes
   share ID                       显式输出含客户端秘密的分享链接
   service start|stop|restart|status|enable|disable
@@ -151,11 +152,11 @@ xm_list() {
     jq -r 'if (.nodes|length)==0 then "尚无节点。选择添加节点开始配置。" else "ID\t名称\t协议\t端口\t地址", (.nodes[] | [.id,.name,.type,(.port|tostring),.address] | @tsv) end' "$XM_STATE"
 }
 xm_node_unique_secrets() {
-    local node=$1
-    jq -e --argjson node "$node" '
-      .nodes | all(. as $old | ["uuid","private_key","public_key","short_id","password","path"] |
+    local node=$1 exclude=${2:-}
+    jq -Rse --arg exclude "$exclude" --slurpfile state "$XM_STATE" '
+      fromjson as $node | $state[0].nodes | map(select(.id!=$exclude)) | all(. as $old | ["uuid","private_key","public_key","short_id","password","path"] |
         all(. as $key | ($node[$key] == null or $old[$key] == null or $node[$key] != $old[$key])))
-    ' "$XM_STATE" >/dev/null || { xm_error '随机密钥、凭据或 XHTTP 路径与已有节点冲突，请重新添加或更换输入。'; return 1; }
+    ' <<< "$node" >/dev/null || { xm_error '随机密钥、凭据或 XHTTP 路径与已有节点冲突，请重新添加或更换输入。'; return 1; }
 }
 xm_menu_draft() {
     local attempts
@@ -179,10 +180,141 @@ xm_add() {
     xm_node_unique_secrets "$node" || return 1
     jq -e --arg id "$id" --arg name "$name" --argjson port "$port" '.nodes | all(.id != $id and .name != $name and .port != $port)' "$XM_STATE" >/dev/null || { xm_error '节点 ID、名称或端口已经存在。'; return 1; }
     platform_port_available "$port" || { xm_error '该端口已被监听，请换一个端口。'; return 1; }
-    jq --argjson node "$node" '.nodes += [$node]' "$XM_STATE" > "$XM_WORK_DIR/state.json" || return 1
+    jq --slurpfile state "$XM_STATE" '. as $node | $state[0] | .nodes += [$node]' <<< "$node" > "$XM_WORK_DIR/state.json" || return 1
     state_apply "$XM_WORK_DIR/state.json" || return 1
     xm_info "节点 $id 已保存。运行 share $id 查看客户端链接。"
 }
+xm_node_patch() {
+    local node=$1 field=$2 value=$3 type candidate
+    type=$(jq -r .type <<< "$node") || return 1
+    [[ $field != shortid ]] || field=short_id
+    case "$type:$field" in
+        *:name|*:port|*:address|shadowsocks:password|vless-reality:uuid|vless-reality:sni|vless-reality:target|vless-reality:short_id|vless-reality:keys|vless-xhttp:uuid|vless-xhttp:sni|vless-xhttp:target|vless-xhttp:short_id|vless-xhttp:keys|vless-xhttp:path|vless-xhttp:mode) ;;
+        *) xm_error '该字段不属于当前节点协议；ID、类型和加密算法固定。'; return 2 ;;
+    esac
+    if [[ $field == keys ]]; then
+        (($# == 4)) || { xm_error 'REALITY 密钥须同时提供私钥和公钥。'; return 2; }
+        candidate=$(printf '%s\0' "$node" "$value" "$4" | jq -Rsc 'split("\u0000") as $data | ($data[0]|fromjson) | .private_key=$data[1] | .public_key=$data[2]') || return 1
+    elif [[ $field == port ]]; then
+        (($# == 3)) && [[ $value =~ ^[1-9][0-9]{0,4}$ ]] || { xm_error '端口须为 1..65535，不接受前导零。'; return 2; }
+        candidate=$(jq -c --argjson port "$value" '.port=$port' <<< "$node") || return 1
+    else
+        (($# == 3)) || return 2
+        candidate=$(printf '%s\0' "$node" "$value" | jq -Rsc --arg field "$field" 'split("\u0000") as $data | ($data[0]|fromjson) | .[$field]=$data[1]') || return 1
+    fi
+    protocol_validate_node "$candidate" || return 1
+    printf '%s\n' "$candidate"
+}
+xm_edit_conflicts() {
+    local original=$1 candidate=$2 id port previous_port name
+    id=$(jq -r .id <<< "$original"); port=$(jq -r .port <<< "$candidate")
+    previous_port=$(jq -r .port <<< "$original"); name=$(jq -r .name <<< "$candidate")
+    jq -e --arg id "$id" --arg name "$name" --argjson port "$port" '.nodes|all(.id==$id or (.name!=$name and .port!=$port))' "$XM_STATE" >/dev/null || { xm_error '名称或端口与其他节点冲突，请重新输入。'; return 1; }
+    xm_node_unique_secrets "$candidate" "$id" || return 1
+    [[ $port == "$previous_port" ]] || platform_port_available "$port" || { xm_error '新端口已被监听，请重新输入。'; return 1; }
+}
+xm_edit() {
+    (($# == 3 || $# == 4)) || { xm_usage_error 'edit ID FIELD VALUE；keys 字段须私钥和公钥两个值。'; return 2; }
+    local id=$1 original candidate actual
+    shift
+    xm_ready || return 1
+    original=$(jq -ec --arg id "$id" '.nodes[]|select(.id==$id)' "$XM_STATE") || { xm_error '节点不存在。'; return 1; }
+    xm_selected_unchanged "$id" || return 1
+    candidate=$(xm_node_patch "$original" "$@") || return $?
+    xm_edit_conflicts "$original" "$candidate" || return 1
+    xm_unlock
+    [[ $candidate != "$original" ]] || { xm_info '节点未变化，无须保存。'; return 0; }
+    xm_node_summary "$candidate"
+    xm_confirm "保存节点 $id 的修改？" || return 2
+    # Human input holds no lock. Verify the exact source again when committing.
+    xm_ready || return 1
+    actual=$(jq -ec --arg id "$id" '.nodes[]|select(.id==$id)' "$XM_STATE") || return 1
+    [[ $actual == "$original" ]] || { xm_error '节点信息已变化，请重新选择并编辑。'; return 1; }
+    xm_selected_unchanged "$id" && protocol_validate_node "$candidate" && xm_edit_conflicts "$original" "$candidate" && xm_work_begin || return 1
+    jq --arg id "$id" --slurpfile state "$XM_STATE" '. as $node | $state[0] | .nodes|=map(if .id==$id then $node else . end)' <<< "$candidate" > "$XM_WORK_DIR/state.json" || return 1
+    state_apply "$XM_WORK_DIR/state.json" || return 1
+    xm_info "节点 $id 已更新，ID 与类型保持不变。"
+}
+xm_edit_secret() {
+    local variable=$1 prompt=$2 default=$3 reply
+    [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
+    while :; do
+        printf '%s [回车保持现有值；隐藏]：' "$prompt" >&2
+        IFS= read -r -s reply || { printf '\n' >&2; return 2; }
+        printf '\n' >&2
+        [[ $reply != :q ]] || return 2
+        xm_input_safe "$reply" || { xm_error '输入不能含控制字符。'; continue; }
+        [[ -n $reply ]] || reply=$default
+        printf -v "$variable" '%s' "$reply"
+        return 0
+    done
+}
+xm_menu_edit() {
+    local original=$1 field=${2:-} type id XM_CHOICE XM_VALUE XM_PRIVATE XM_PUBLIC XM_CONFIRM candidate index
+    local -a fields=(port address) captions=('监听端口' '对外地址（IP/域名）')
+    type=$(jq -r .type <<< "$original"); id=$(jq -r .id <<< "$original")
+    if [[ -z $field ]]; then
+        case $type in
+            vless-reality|vless-xhttp)
+                fields+=(sni target uuid short_id keys)
+                captions+=('REALITY SNI' 'REALITY 目标（域名:端口）' 'UUID' 'ShortID（偶数位十六进制）' 'REALITY 公私钥（成对替换）')
+                [[ $type != vless-xhttp ]] || { fields+=(path mode); captions+=('XHTTP 路径（/开头，字母数字/_-）' 'XHTTP 模式（auto/packet-up/stream-up/stream-one）'); } ;;
+            shadowsocks) fields+=(password); captions+=('SS2022 主密钥（16字节标准Base64）') ;;
+            *) return 1 ;;
+        esac
+        xm_ui_heading '修改节点配置'
+        for ((index=0; index<${#fields[@]}; index++)); do xm_ui_item "$((index+1))" "${captions[index]}"; done
+        xm_ui_item 0 '返回'
+        while :; do
+            xm_read XM_CHOICE '配置编号' '0' || return 2
+            [[ $XM_CHOICE != 0 ]] || return 0
+            if [[ $XM_CHOICE =~ ^[1-9][0-9]{0,2}$ ]] && ((XM_CHOICE <= ${#fields[@]})); then index=$((XM_CHOICE-1)); field=${fields[index]}; break; fi
+            xm_error '请输入列表中的配置编号或 0。'
+        done
+    else
+        index=0; captions=('显示名称')
+    fi
+    xm_info '回车保留当前值；:q 取消。ID 与协议类型固定，秘密不默认回显。'
+    while :; do
+        case $field in
+            keys)
+                xm_edit_secret XM_PRIVATE 'REALITY 私钥（回车保持现有值）' "$(jq -r .private_key <<< "$original")" || return 2
+                xm_edit_secret XM_PUBLIC 'REALITY 公钥（回车保持现有值）' "$(jq -r .public_key <<< "$original")" || return 2
+                candidate=$(xm_node_patch "$original" keys "$XM_PRIVATE" "$XM_PUBLIC") || continue ;;
+            uuid|short_id|password)
+                xm_edit_secret XM_VALUE "${captions[index]}（回车保持现有值）" "$(jq -r --arg field "$field" '.[$field]' <<< "$original")" || return 2
+                candidate=$(xm_node_patch "$original" "$field" "$XM_VALUE") || continue ;;
+            *)
+                xm_read XM_VALUE "${captions[index]}" "$(jq -r --arg field "$field" '.[$field]' <<< "$original")" || return 2
+                candidate=$(xm_node_patch "$original" "$field" "$XM_VALUE") || continue ;;
+        esac
+        xm_edit_conflicts "$original" "$candidate" || continue
+        break
+    done
+    [[ $candidate != "$original" ]] || { xm_info '节点未变化，无须保存。'; return 0; }
+    xm_node_summary "$candidate"
+    xm_read XM_CONFIRM '保存修改？输入 y/yes（不区分大小写）' 'no' || return 2
+    xm_yes "$XM_CONFIRM" || { xm_info '已取消修改。'; return 2; }
+    local XM_YES=1
+    if [[ $field == keys ]]; then xm_dispatch edit "$id" keys "$XM_PRIVATE" "$XM_PUBLIC"; else xm_dispatch edit "$id" "$field" "$XM_VALUE"; fi
+}
+xm_menu_node_details() {
+    local node=$1 XM_CHOICE field label value
+    for field in sni target path mode method; do
+        value=$(jq -r --arg field "$field" '.[$field] // empty' <<< "$node")
+        [[ -n $value ]] || continue
+        case $field in sni) label='SNI' ;; target) label='REALITY 目标' ;; path) label='XHTTP 路径' ;; mode) label='XHTTP 模式' ;; method) label='加密算法' ;; esac
+        printf '%s%s%s  %s%s%s\n' "$XM_UI_CYAN" "$label" "$XM_UI_RESET" "$XM_UI_GREEN" "$value" "$XM_UI_RESET" >&2
+    done
+    xm_info '凭据保持隐藏；查看客户端链接请选择“分享链接”。'
+    printf '\n' >&2
+    xm_ui_item 1 '修改名称'; xm_ui_item 2 '修改节点配置'; xm_ui_item 0 '返回'
+    while :; do
+        xm_read XM_CHOICE '节点操作编号' '0' || return 2
+        case $XM_CHOICE in 0) return 0 ;; 1) xm_menu_edit "$node" name; return $? ;; 2) xm_menu_edit "$node"; return $? ;; *) xm_error '请输入 0、1 或 2。' ;; esac
+    done
+}
+
 xm_delete() {
     (($# == 1)) || { xm_usage_error 'delete 需要节点 ID。'; return 2; }
     xm_ready && xm_work_begin || return 1
@@ -287,6 +419,7 @@ xm_dispatch() {
         rollback) xm_rollback "$@" ;;
         list) xm_list "$@" ;;
         add) xm_add "$@" ;;
+        edit) xm_edit "$@" ;;
         delete) xm_delete "$@" ;;
         share) xm_share "$@" ;;
         service) xm_service "$@" ;;
@@ -351,16 +484,7 @@ xm_menu_node() {
     xm_unlock
     printf '\n' >&2; xm_node_summary "$XM_SELECTED_NODE"
     case $action in
-        view)
-            local field label value
-            for field in sni target path mode method; do
-                value=$(jq -r --arg field "$field" '.[$field] // empty' <<< "$XM_SELECTED_NODE")
-                [[ -n $value ]] || continue
-                case $field in sni) label='SNI' ;; target) label='REALITY 目标' ;; path) label='XHTTP 路径' ;; mode) label='XHTTP 模式' ;; method) label='加密算法' ;; esac
-                printf '%s%s%s  %s%s%s\n' "$XM_UI_CYAN" "$label" "$XM_UI_RESET" "$XM_UI_GREEN" "$value" "$XM_UI_RESET" >&2
-            done
-            xm_info '凭据保持隐藏；查看客户端链接请选择“分享链接”。'
-            ;;
+        view) xm_menu_node_details "$XM_SELECTED_NODE" ;;
         share) xm_info '以下链接包含客户端秘密，请妥善保管，勿公开。'; xm_dispatch share "$selected_id" ;;
         delete) xm_dispatch delete "$selected_id" ;;
     esac

@@ -148,7 +148,7 @@ printf '9\n2\n' > "$TEST_ROOT/input"
 xm_menu_node share < "$TEST_ROOT/input" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/select.log" || fail 'share numbered selection'
 jq -e '.[0]=="share" and .[1]=="second"' "$TEST_CALL" >/dev/null || fail 'share selection wrong ID'
 grep -q '\[1\].*First SS.*ss2022' "$TEST_ROOT/select.log" && grep -q '请输入 1..2' "$TEST_ROOT/select.log" || fail 'selection list/type/retry missing'
-printf '1\n' > "$TEST_ROOT/input"
+printf '1\n0\n' > "$TEST_ROOT/input"
 xm_menu_node view < "$TEST_ROOT/input" > "$TEST_ROOT/view.json" 2> "$TEST_ROOT/view.log" || fail 'view numbered selection'
 grep -q 'ID first' "$TEST_ROOT/view.log" || fail 'view wrong node'
 if grep -Fq "$(jq -r .password <<< "$TEST_NODE_A")" "$TEST_ROOT/view.log" "$TEST_ROOT/view.json"; then fail 'view leaked secret'; fi
