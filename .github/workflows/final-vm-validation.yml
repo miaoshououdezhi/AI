@@ -1,0 +1,113 @@
+name: Final F Debian systemd VM validation
+on:
+  push:
+    branches: [codex/xray-manager-vm-final-F]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  debian-systemd:
+    if: github.ref == 'refs/heads/codex/xray-manager-vm-final-F'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    steps:
+      - name: Checkout immutable product F
+        uses: actions/checkout@v4
+        with:
+          ref: 25d1e1c63151ef8dadcdf993d920a79cf5edc6ba
+          path: product
+          persist-credentials: false
+      - name: Checkout validation harness
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+      - name: Build isolated Debian 12 root filesystem
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p evidence rootfs
+          exec > >(tee evidence/build.log) 2>&1
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 e2fsprogs
+          docker pull debian:12
+          docker image inspect debian:12 --format '{{json .RepoDigests}}' | tee evidence/debian-image-digest.txt
+          container=$(docker create debian:12 sh -ec '
+            printf "#!/bin/sh\nexit 101\n" > /usr/sbin/policy-rc.d
+            chmod 755 /usr/sbin/policy-rc.d
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y systemd systemd-sysv iproute2 util-linux procps ca-certificates openssl linux-image-cloud-amd64 initramfs-tools
+            rm /usr/sbin/policy-rc.d
+            update-initramfs -u -k all
+          ')
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker start -a "$container"
+          [[ $(docker inspect "$container" --format '{{.State.ExitCode}}') == 0 ]]
+          docker export "$container" > evidence/rootfs.tar
+          sudo tar -xf evidence/rootfs.tar -C rootfs
+          rm evidence/rootfs.tar
+          sudo mkdir -p rootfs/root/source rootfs/etc/systemd/system
+          sudo cp -a product/. rootfs/root/source/
+          sudo rm -rf rootfs/root/source/.git
+          sudo cp harness/work/multi-vm-ci-entry.sh rootfs/root/ci-entry.sh
+          sudo chmod 700 rootfs/root/ci-entry.sh
+          sudo tee rootfs/etc/systemd/system/vm-validation.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=Private final F lifecycle validation
+          After=local-fs.target
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/bash /root/ci-entry.sh
+          TimeoutStartSec=3600
+          StandardOutput=tty
+          StandardError=tty
+          TTYPath=/dev/ttyS0
+          UNIT
+          sudo sh -c ': > rootfs/etc/machine-id; rm -f rootfs/var/lib/dbus/machine-id; ln -s /etc/machine-id rootfs/var/lib/dbus/machine-id'
+          sudo cp "$(find rootfs/boot -name 'vmlinuz-*' | sort -V | tail -1)" evidence/vmlinuz
+          sudo cp "$(find rootfs/boot -name 'initrd.img-*' | sort -V | tail -1)" evidence/initrd
+          truncate -s 3G evidence/debian.ext4
+          sudo mkfs.ext4 -F -d rootfs evidence/debian.ext4
+      - name: Boot real systemd VM and verify explicit outcome
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          accel=(-accel 'tcg,thread=multi,tb-size=128' -cpu max)
+          set +e
+          # Runner owns evidence; only the KVM probe requires sudo.
+          # shellcheck disable=SC2024
+          sudo timeout 3 qemu-system-x86_64 -accel kvm -cpu host -machine none -nodefaults -display none -S > evidence/kvm-probe.log 2>&1
+          probe=$?
+          set -e
+          if [[ -c /dev/kvm && $probe == 124 ]]; then accel=(-accel kvm -cpu host); fi
+          printf 'QEMU_ACCEL=%s\n' "${accel[*]}" | tee evidence/environment.log
+          qemu-system-x86_64 --version | tee -a evidence/environment.log
+          set +e
+          # Runner owns the log; sudo is needed only for KVM/disk access.
+          # shellcheck disable=SC2024
+          sudo timeout --signal=TERM --kill-after=30 3900 qemu-system-x86_64 \
+            -m 2048 -smp 2 "${accel[@]}" -nographic -no-reboot \
+            -kernel evidence/vmlinuz -initrd evidence/initrd \
+            -append 'root=/dev/vda rw console=ttyS0 systemd.unit=vm-validation.service net.ifnames=0 panic=30' \
+            -drive file=evidence/debian.ext4,format=raw,if=virtio \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            > evidence/serial.log 2>&1
+          qemu_code=$?
+          set -e
+          printf 'QEMU_EXIT=%s\n' "$qemu_code" | tee -a evidence/environment.log
+          cat evidence/serial.log
+          [[ $qemu_code == 0 ]]
+          tr -d '\r' < evidence/serial.log > evidence/serial-normalized.log
+          grep -qx 'SYSTEMD_DUAL_CORE_MIGRATION_CLEANUP_PASS' evidence/serial-normalized.log
+          grep -qx 'MULTI_VM_CI_ENTRY_EXIT=0' evidence/serial-normalized.log
+          ! grep -Eq 'MULTI_VM_CI_ENTRY_EXIT=[1-9]' evidence/serial-normalized.log
+      - name: Upload complete raw evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-F-debian12-systemd-raw
+          path: |
+            evidence/*.log
+            evidence/*digest.txt
+          if-no-files-found: warn
