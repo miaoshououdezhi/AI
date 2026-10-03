@@ -14,8 +14,8 @@ cp "$repo/assets/xy" "$XM_HOME/assets/xy"
 printf 'core\n' > "$XM_BIN"
 printf '{"nodes":[]}\n' > "$XM_ETC/state.json"
 printf 'log\n' > "$XM_LOG/console.log"
-printf 'native failure\n' > "$XM_ETC/last-error.log"
-printf 'native extra failure\n' > "$XM_ETC/last-extra-error.log"
+printf 'native failure\n' > "$XM_LOG/last-error.log"
+printf 'native extra failure\n' > "$XM_LOG/last-extra-error.log"
 printf 'external export\n' > "$tmp/export.json"
 platform_shortcut_install
 platform_clean_uninstall_preflight

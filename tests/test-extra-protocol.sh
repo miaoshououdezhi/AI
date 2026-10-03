@@ -63,7 +63,18 @@ openssl ca -batch -selfsign -config "$scratch/ca.cnf" -keyfile "$scratch/key.pem
 jq --rawfile cert "$scratch/future.pem" '.tls_cert=$cert' "$scratch/anytls.json" > "$scratch/future.json"
 reject protocol_validate_node "$(cat "$scratch/future.json")"
 protocol_validate_node "$(cat "$scratch/future.json")" maintenance
-printf 'PASS strict rejects expired/future TLS; explicit maintenance retains SAN/key validation\n'
+# Two existing expired nodes can be generated only in explicit maintenance.
+jq -n --slurpfile n "$scratch/expired.json" '{schema_version:1,nodes:[$n[0],($n[0]|.id="another"|.name="another"|.port=25006)]}' > "$scratch/expired-state.json"
+reject protocol_generate "$scratch/expired-state.json" "$scratch/expired-xray.json"
+reject protocol_generate_extra "$scratch/expired-state.json" "$scratch/expired-extra.json"
+protocol_generate "$scratch/expired-state.json" "$scratch/expired-xray.json" maintenance
+protocol_generate_extra "$scratch/expired-state.json" "$scratch/expired-extra.json" maintenance
+reject protocol_generate "$scratch/expired-state.json" "$scratch/invalid.json" invalidmode
+reject protocol_generate_extra "$scratch/expired-state.json" "$scratch/invalid.json" invalidmode
+jq '.nodes[1].sni="bad.example"' "$scratch/expired-state.json" > "$scratch/invalid-state.json"
+reject protocol_generate "$scratch/invalid-state.json" "$scratch/invalid.json" maintenance
+reject protocol_generate_extra "$scratch/invalid-state.json" "$scratch/invalid.json" maintenance
+printf 'PASS strict rejects expired/future TLS; explicit maintenance retains SAN/key validation and multi-node generation\n'
 for type in ws socks anytls hysteria2 tuicv5; do
     protocol_share "$(cat "$scratch/$type.json")" > "$scratch/$type.uri"
 done
@@ -90,3 +101,34 @@ protocol_generate_extra "$scratch/state.json" "$scratch/migrated-extra.json"
 if [[ -n ${XRAY_BIN:-} ]]; then "$XRAY_BIN" run -test -config "$scratch/xray.json"; fi
 if [[ -n ${XM_EXTRA_BIN:-} ]]; then "$XM_EXTRA_BIN" check -c "$scratch/extra.json"; fi
 printf 'PASS five new node schemas, TLS SAN/pair/permissions/portable PEM, URI safety, split engines\n'
+
+# Real Python errors inherit only Common-selected safe stderr red; no machine
+# stdout pollution, NO_COLOR (including empty) and TERM=dumb stay plain.
+"${XM_PYTHON:-python3}" - "$repo" <<'PYTEST'
+import errno,os,pty,select,subprocess,sys
+repo=sys.argv[1]
+commands=["protocol_validate_node '{}'", "protocol_tls_read /nonexistent-fixture-cert /nonexistent-fixture-key localhost"]
+for command in commands:
+ for setting in ('color','no-color','dumb','pipe'):
+  env=dict(os.environ);env.pop('NO_COLOR',None);env['TERM']='dumb' if setting=='dumb' else 'xterm'
+  if setting=='no-color':env['NO_COLOR']=''
+  master,slave=pty.openpty()
+  proc=subprocess.Popen(['bash','-c','source "$1/lib/common.sh"; xm_ui_init; source "$1/lib/protocol.sh"; '+command,'_',repo],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE if setting=='pipe' else slave,env=env)
+  out,err=proc.communicate();assert proc.returncode==1 and out==b''
+  if setting!='pipe':
+   chunks=[]
+   while select.select([master],[],[],0.1)[0]:
+    try:
+     data=os.read(master,4096)
+     if not data:break
+     chunks.append(data)
+    except OSError as e:
+     if e.errno==errno.EIO:break
+     raise
+   err=b''.join(chunks)
+  os.close(slave);os.close(master)
+  assert b'[\xe9\x94\x99\xe8\xaf\xaf]' in err,(command,setting,err)
+  assert (b'\x1b[91m' in err)==(setting=='color'),(setting,err)
+  assert b'PRIVATE KEY' not in err
+print('PASS Common-selected TTY red validation/TLS errors; NO_COLOR/dumb/piped stderr plain, stdout empty')
+PYTEST

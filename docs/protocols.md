@@ -42,7 +42,7 @@ protocol_new vless-reality ID NAME PORT ADDRESS SNI TARGET [UUID PRIVATE PUBLIC 
 protocol_new vless-xhttp ID NAME PORT ADDRESS SNI TARGET PATH MODE [UUID PRIVATE PUBLIC SHORTID]
 protocol_new shadowsocks ID NAME PORT ADDRESS [PASSWORD]
 protocol_validate_node NODE_JSON [strict|maintenance]
-protocol_generate STATE_FILE OUTPUT_FILE
+protocol_generate STATE_FILE OUTPUT_FILE [strict|maintenance]
 protocol_share NODE_JSON
 ```
 
@@ -100,7 +100,7 @@ protocol_new anytls ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [PASSWORD]
 protocol_new hysteria2 ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [PASSWORD]
 protocol_new tuicv5 ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [UUID PASSWORD]
 protocol_tls_read CERT_FILE KEY_FILE SNI
-protocol_generate_extra STATE_FILE OUTPUT_FILE
+protocol_generate_extra STATE_FILE OUTPUT_FILE [strict|maintenance]
 protocol_has_extra STATE_FILE
 protocol_engine TYPE
 ```
@@ -124,3 +124,5 @@ XRAY_BIN=/path/to/xray XM_EXTRA_BIN=/path/to/sing-box bash tests/test-extra-e2e.
 分享格式另外核实 [AnyTLS 官方 URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md)、[v2rayN TUIC URI 解析](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/TuicFmt.cs)、[v2rayN SOCKS URI 解析](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/SocksFmt.cs)。SOCKS 使用标准 `socks5://username:password@host:port` percent-encoded userinfo；客户端支持情况需各自确认。
 
 TLS 维护模式是显式参数 `protocol_validate_node NODE_JSON maintenance`，仅略过证书过期或尚未生效的时间检查，保留 schema、PEM、SAN 和公私钥配对检查。只用于读取既有状态以续期、删除或私密导出；新建、导入、候选配置及修改默认严格校验。不存在全局环境变量开关；任意其他模式会拒绝。
+
+两种配置生成器也接受显式第三参数 `[strict|maintenance]`，默认严格。Shell 只有删除或编辑事务在逐节点比较新旧状态后才使用维护生成：新增或发生任何变化的节点严格验证，完全未变化的已有节点可只略过证书时间检查。这样能够逐个删除或续期多个已过期节点；添加与导入保持全部严格校验。生成器不自行证明节点未变化，上层差异检查必须先通过，不能用此模式绕过候选校验。

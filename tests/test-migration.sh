@@ -120,3 +120,50 @@ cp "$XM_STATE" "$scratch/before-renewal"
 if xm_dispatch edit at tls "$scratch/renew-cert.pem" "$scratch/wrong-key.pem" localhost >/dev/null 2>&1; then fail 'mismatched TLS pair accepted'; fi
 cmp "$XM_STATE" "$scratch/before-renewal" || fail 'failed TLS renewal changed state'
 pass 'TLS renewal validates matching certificate/key together and preserves credentials'
+
+# Existing expired TLS nodes must be maintainable one at a time. Real PEM
+# validation is used; only core execution and service health are test doubles.
+mkdir "$scratch/ca-new"
+: > "$scratch/ca-index"; printf '01\n' > "$scratch/ca-serial"
+cat > "$scratch/ca.cnf" <<EOF
+[ca]
+default_ca=local
+[local]
+database=$scratch/ca-index
+serial=$scratch/ca-serial
+new_certs_dir=$scratch/ca-new
+default_md=sha256
+default_days=2
+policy=policy
+x509_extensions=ext
+[policy]
+commonName=supplied
+[ext]
+subjectAltName=DNS:localhost
+EOF
+openssl req -new -key "$scratch/renew-key.pem" -out "$scratch/request.pem" -subj /CN=localhost >/dev/null 2>&1 || fail 'expired request'
+openssl ca -batch -selfsign -config "$scratch/ca.cnf" -keyfile "$scratch/renew-key.pem" -in "$scratch/request.pem" -startdate 20200101000000Z -enddate 20210101000000Z -out "$scratch/expired.pem" -notext >/dev/null 2>&1 || fail 'expired certificate'
+protocol_new vless-ws expired-one 'Expired one' 27101 127.0.0.1 localhost /expired-one "$scratch/renew-cert.pem" "$scratch/renew-key.pem" > "$scratch/expired-one" || fail 'first expired node'
+protocol_new vless-ws expired-two 'Expired two' 27102 127.0.0.1 localhost /expired-two "$scratch/renew-cert.pem" "$scratch/renew-key.pem" > "$scratch/expired-two" || fail 'second expired node'
+jq -n --slurpfile a "$scratch/expired-one" --slurpfile b "$scratch/expired-two" --rawfile cert "$scratch/expired.pem" '{schema_version:1,core_version:"v26.3.27",nodes:[$a[0],$b[0]]}|.nodes[].tls_cert=$cert' > "$scratch/two-expired"
+cp "$scratch/two-expired" "$XM_STATE"
+protocol_generate "$XM_STATE" "$XM_CONFIG" maintenance && protocol_generate_extra "$XM_STATE" "$XM_EXTRA_CONFIG" maintenance || fail 'expired config setup'
+reject_import "$scratch/two-expired"
+xm_dispatch edit expired-one tls "$scratch/renew-cert.pem" "$scratch/renew-key.pem" localhost >/dev/null 2>&1 || fail 'renew first while second expired'
+xm_dispatch edit expired-two tls "$scratch/renew-cert.pem" "$scratch/renew-key.pem" localhost >/dev/null 2>&1 || fail 'renew second expired'
+state_validate "$XM_STATE" strict || fail 'sequential renewal remains expired'
+cp "$scratch/two-expired" "$XM_STATE"
+protocol_generate "$XM_STATE" "$XM_CONFIG" maintenance && protocol_generate_extra "$XM_STATE" "$XM_EXTRA_CONFIG" maintenance || fail 'delete expired setup'
+(xm_confirm() { return 0; }; xm_dispatch delete expired-one) >/dev/null 2>&1 || fail 'delete first while second expired'
+[[ $(jq '.nodes|length' "$XM_STATE") == 1 ]] || fail 'first expired delete lost sibling'
+(xm_confirm() { return 0; }; xm_dispatch delete expired-two) >/dev/null 2>&1 || fail 'delete last expired'
+[[ $(jq '.nodes|length' "$XM_STATE") == 0 ]] || fail 'expired delete incomplete'
+# Exact JSON, rather than matching ID, defines an unchanged exception.
+cp "$scratch/two-expired" "$XM_STATE"
+jq '.nodes[0].name="changed expired"' "$XM_STATE" > "$scratch/changed-expired"
+if state_validate_maintenance_candidate "$scratch/changed-expired" >/dev/null 2>&1; then fail 'modified expired node bypassed strict validation'; fi
+: > "$scratch/ca-index"; printf '02\n' > "$scratch/ca-serial"
+openssl ca -batch -selfsign -config "$scratch/ca.cnf" -keyfile "$scratch/renew-key.pem" -in "$scratch/request.pem" -startdate 20900101000000Z -enddate 20910101000000Z -out "$scratch/future.pem" -notext >/dev/null 2>&1 || fail 'future certificate'
+jq --rawfile cert "$scratch/future.pem" '.nodes[].tls_cert=$cert' "$scratch/two-expired" > "$scratch/future-state"
+reject_import "$scratch/future-state"
+pass 'two expired nodes renew/delete sequentially; modified expired and expired/future imports remain strict'

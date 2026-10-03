@@ -59,3 +59,41 @@ printf '# foreign unit\n' > "$tmp/unit"
 reject platform_extra_discard_new 0 0
 [[ $(cat "$tmp/unit") == '# foreign unit' && ! -e $XM_EXTRA_BIN ]] || fail 'foreign unit rollback boundary'
 printf 'PASS: auxiliary artifact rollback preserves existing/foreign units and removes only new verified binary/hash/unit\n'
+# Human Python messages are tagged/colorized on stderr; machine stdout stays
+# parseable. Native PTYs verify TERM/NO_COLOR without any real init operation.
+python3 - "$repo/lib/platform.sh" <<'PY'
+import errno,json,os,pty,subprocess,sys,threading
+program='''source "$1"
+_platform_python - <<'BODY'
+human('信息','消息')
+human('警告','保留依赖')
+human('错误','验证失败')
+print('{"machine":true}')
+BODY
+'''
+args=['bash','-c',program,'bash',sys.argv[1]]
+env=os.environ.copy();env['TERM']='xterm';env.pop('NO_COLOR',None)
+r=subprocess.run(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
+assert json.loads(r.stdout)=={'machine':True} and b'\x1b' not in r.stdout+r.stderr
+assert '[信息] 消息' in r.stderr.decode() and '[警告] 保留依赖' in r.stderr.decode() and '[错误] 验证失败' in r.stderr.decode()
+for no_color,term,want_color in ((False,'xterm',True),(True,'xterm',False),(False,'dumb',False)):
+ master,slave=pty.openpty();e=env.copy();e['TERM']=term
+ if no_color:e['NO_COLOR']=''
+ chunks=[]
+ def reader():
+  while True:
+   try:
+    data=os.read(master,4096)
+    if not data:break
+    chunks.append(data)
+   except OSError as err:
+    if err.errno==errno.EIO:break
+    raise
+ thread=threading.Thread(target=reader);thread.start()
+ child=subprocess.Popen(args,env=e,stdout=subprocess.PIPE,stderr=slave)
+ output,_=child.communicate();os.close(slave);thread.join();os.close(master)
+ out=b''.join(chunks)
+ assert child.returncode==0 and json.loads(output)=={'machine':True} and b'\x1b' not in output
+ assert (b'\x1b[96m' in out and b'\x1b[93m' in out and b'\x1b[91m' in out)==want_color, (term,no_color,out)
+print('PASS: human Python stderr labels/TTY palette, NO_COLOR/TERM=dumb and clean machine stdout')
+PY

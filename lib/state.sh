@@ -25,6 +25,18 @@ state_validate() {
         xm_error '节点 ID、名称、端口、凭据或路径重复。'; return 1;
     }
 }
+# Only edit/delete may preserve exact existing nodes with expired TLS.
+# Changed/new nodes remain strict; identity alone never grants an exception.
+state_validate_maintenance_candidate() {
+    local candidate=$1 node
+    state_validate "$XM_STATE" maintenance && state_validate "$candidate" maintenance || return 1
+    jq -e --slurpfile old "$XM_STATE" '.core_version==$old[0].core_version' "$candidate" >/dev/null || return 1
+    while IFS= read -r node; do
+        if ! jq -e --slurpfile old "$XM_STATE" '. as $node | any($old[0].nodes[]; .==$node)' <<< "$node" >/dev/null; then
+            protocol_validate_node "$node" strict || return 1
+        fi
+    done < <(jq -c '.nodes[]' "$candidate")
+}
 state_empty() { jq -n --arg version "$1" '{schema_version:1,core_version:$version,nodes:[]}'; }
 state_native_validate() {
     local core=$1 config=$2
@@ -76,14 +88,18 @@ state_rollback() {
     xm_warning '已恢复操作前的配置、核心与各服务运行状态。'
 }
 state_apply() {
-    local candidate=$1 new_core=${2:-} validate_core=${2:-$XM_BIN} failed=0 has_extra=0 old_has_extra=0
+    local candidate=$1 new_core=${2:-} validate_core=${2:-$XM_BIN} mode=${3:-strict} failed=0 has_extra=0 old_has_extra=0
     XM_TX_EXTRA_PREPARED=0; XM_TX_EXTRA_HAD_BIN=1; XM_TX_EXTRA_HAD_SERVICE=1
-    state_validate "$candidate" || return 1
+    case $mode in
+        strict) state_validate "$candidate" || return 1 ;;
+        maintenance) [[ -z $new_core ]] && state_validate_maintenance_candidate "$candidate" || return 1 ;;
+        *) xm_error '未知事务验证模式。'; return 2 ;;
+    esac
     xm_private_temp || return 1
-    if ! cp -- "$candidate" "$XM_TEMP_DIR/new-state.json" || ! protocol_generate "$XM_TEMP_DIR/new-state.json" "$XM_TEMP_DIR/new-config.json" || ! state_native_validate "$validate_core" "$XM_TEMP_DIR/new-config.json"; then
+    if ! cp -- "$candidate" "$XM_TEMP_DIR/new-state.json" || ! protocol_generate "$XM_TEMP_DIR/new-state.json" "$XM_TEMP_DIR/new-config.json" "$mode" || ! state_native_validate "$validate_core" "$XM_TEMP_DIR/new-config.json"; then
         xm_temp_cleanup; return 1
     fi
-    protocol_generate_extra "$XM_TEMP_DIR/new-state.json" "$XM_TEMP_DIR/new-extra.json" || { xm_temp_cleanup; return 1; }
+    protocol_generate_extra "$XM_TEMP_DIR/new-state.json" "$XM_TEMP_DIR/new-extra.json" "$mode" || { xm_temp_cleanup; return 1; }
     XM_TX_EXTRA_AVAILABLE=0
     [[ ! -x $XM_EXTRA_BIN ]] || XM_TX_EXTRA_AVAILABLE=1
     if protocol_has_extra "$XM_TEMP_DIR/new-state.json"; then

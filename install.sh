@@ -1,6 +1,17 @@
 #!/bin/sh
 # POSIX entry point: Alpine installations may not include Bash.
 set -u
+# Human messages stay on stderr; bootstrap needs neither Bash nor tput.
+xray_boot_message() {
+    xray_boot_color=$1; xray_boot_label=$2; shift 2
+    if [ -t 2 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then
+        printf '\033[%sm[%s]\033[0m %s\n' "$xray_boot_color" "$xray_boot_label" "$*" >&2
+    else
+        printf '[%s] %s\n' "$xray_boot_label" "$*" >&2
+    fi
+}
+xray_boot_error() { xray_boot_message 91 '错误' "$@"; }
+xray_boot_info() { xray_boot_message 96 '信息' "$@"; }
 umask 077
 xray_snapshot_tmp=
 cleanup() { [ -z "$xray_snapshot_tmp" ] || rm -rf -- "$xray_snapshot_tmp"; }
@@ -39,20 +50,22 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 if [ "$(id -u)" -eq 0 ] && [ -z "${XM_ROOT:-}" ] && [ -z "${XM_DEPENDENCY_SNAPSHOT_FILE:-}" ]; then
     xray_snapshot_os=$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')
     xray_snapshot_tmp=$(mktemp -d) || exit 1
-    xray_package_snapshot "$xray_snapshot_os" "$xray_snapshot_tmp/dependency-snapshot.json" || { printf '[错误] 无法记录安装前依赖，未安装软件包。\n' >&2; exit 1; }
+    xray_package_snapshot "$xray_snapshot_os" "$xray_snapshot_tmp/dependency-snapshot.json" || { xray_boot_error '无法记录安装前依赖，未安装软件包。'; exit 1; }
     export XM_DEPENDENCY_SNAPSHOT_FILE="$xray_snapshot_tmp/dependency-snapshot.json"
 fi
 if ! command -v bash >/dev/null 2>&1; then
-    if [ "$(id -u)" -ne 0 ]; then printf '%s\n' '[错误] 首次安装 Bash 需要 root。' >&2; exit 1; fi
-    if [ -n "${XM_ROOT:-}" ]; then printf '%s\n' '[错误] 隔离测试不能更改宿主依赖，请预先安装 Bash。' >&2; exit 1; fi
+    if [ "$(id -u)" -ne 0 ]; then xray_boot_error '首次安装 Bash 需要 root。'; exit 1; fi
+    if [ -n "${XM_ROOT:-}" ]; then xray_boot_error '隔离测试不能更改宿主依赖，请预先安装 Bash。'; exit 1; fi
     os_id=$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')
     os_version=$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"')
+    xray_boot_info '正在安装 Bash，安装前依赖快照已记录。'
     case "$os_id:$os_version" in
         alpine:3.23.*|alpine:3.24.*|alpine:3.23|alpine:3.24) apk add --no-cache bash || exit 1 ;;
         debian:12|debian:13) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y bash || exit 1 ;;
-        *) printf '%s\n' '[错误] 仅支持 Debian 12/13 和 Alpine 3.23/3.24。' >&2; exit 1 ;;
+        *) xray_boot_error '仅支持 Debian 12/13 和 Alpine 3.23/3.24。'; exit 1 ;;
     esac
 fi
+xray_boot_info '正在启动管理器安装与配置检查。'
 bash "$script_dir/xray-manager.sh" install "$@"
 xray_install_result=$?
 exit "$xray_install_result"

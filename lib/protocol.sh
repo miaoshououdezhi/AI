@@ -12,7 +12,7 @@ protocol_validate_node() {
     [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
     printf '%s' "$1" | "${XM_PYTHON:-python3}" -c '
 
-import base64, datetime, ipaddress, json, re, subprocess, sys, unicodedata, uuid
+import base64, datetime, ipaddress, json, os, re, subprocess, sys, unicodedata, uuid
 def need(ok, message):
     if not ok: raise ValueError(message)
 def text(n, key, lo=1, hi=1024):
@@ -90,7 +90,9 @@ try:
         pwd=text(n,"password"); raw=base64.b64decode(pwd,validate=True)
         need(len(raw)==16 and base64.b64encode(raw).decode()==pwd,"SS2022 密码必须是 16 字节标准 Base64 密钥")
 except (ValueError,TypeError,KeyError,OSError) as e:
-    print("[错误] 协议："+str(e),file=sys.stderr); sys.exit(1)
+    color=os.environ.get("XM_UI_RED","") if sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM","dumb")!="dumb" else ""
+    color=color if color=="\x1b[91m" else ""
+    print(color+"[错误]"+("\x1b[0m" if color else "")+" 协议："+str(e),file=sys.stderr); sys.exit(1)
 ' "$mode"
 }
 
@@ -162,8 +164,9 @@ protocol_new() {
 }
 
 protocol_generate() {
-    [[ $# == 2 && -f $1 && ! -L $1 && ! -L $2 ]] || { _protocol_error '状态或输出路径无效'; return 1; }
-    local state=$1 output=$2 node listen
+    [[ ($# == 2 || $# == 3) && -f $1 && ! -L $1 && ! -L $2 ]] || { _protocol_error '状态或输出路径无效'; return 1; }
+    local state=$1 output=$2 node listen mode=${3:-strict}
+    [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
     listen=$("${XM_PYTHON:-python3}" -c '
 import errno,socket
 try:
@@ -180,7 +183,7 @@ except OSError as e:
         listen=0.0.0.0
     fi
     jq -e 'type=="object" and .schema_version==1 and (.nodes|type=="array") and (.nodes|length<=128) and (.nodes|map(.id)|length== (unique|length)) and (.nodes|map(.port)|length==(unique|length))' "$state" >/dev/null || { _protocol_error '状态 schema 或重复 ID/端口无效'; return 1; }
-    while IFS= read -r node; do protocol_validate_node "$node" || return 1; done < <(jq -c '.nodes[]' "$state")
+    while IFS= read -r node; do protocol_validate_node "$node" "$mode" || return 1; done < <(jq -c '.nodes[]' "$state")
     if [[ $listen == 0.0.0.0 ]] && jq -e '.nodes|any(.address|contains(":"))' "$state" >/dev/null; then
         _protocol_error '当前服务器 IPv6 不可用，请使用 IPv4 地址或域名'; return 1
     fi
@@ -265,7 +268,9 @@ try:
             values.append(raw.decode("ascii"))
     print(json.dumps({"sni":sni,"tls_cert":values[0],"tls_key":values[1]}))
 except (OSError,ValueError,UnicodeError) as e:
-    print("[错误] 协议："+str(e),file=sys.stderr);sys.exit(1)
+    color=os.environ.get("XM_UI_RED","") if sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM","dumb")!="dumb" else ""
+    color=color if color=="\x1b[91m" else ""
+    print(color+"[错误]"+("\x1b[0m" if color else "")+" 协议："+str(e),file=sys.stderr);sys.exit(1)
 ') || return 1
     probe=$(printf '%s' "$tls" | jq -c '.+{id:"tlsprobe",name:"TLS probe",type:"anytls",port:443,address:.sni,password:"fixture-validation-password"}') || return 1
     protocol_validate_node "$probe" || return 1
@@ -273,8 +278,9 @@ except (OSError,ValueError,UnicodeError) as e:
 }
 
 protocol_generate_extra() {
-    [[ $# == 2 && -f $1 && ! -L $1 && ! -L $2 ]] || { _protocol_error '状态或输出路径无效'; return 1; }
-    local node listen
+    [[ ($# == 2 || $# == 3) && -f $1 && ! -L $1 && ! -L $2 ]] || { _protocol_error '状态或输出路径无效'; return 1; }
+    local node listen mode=${3:-strict}
+    [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
     listen=$("${XM_PYTHON:-python3}" -c '
 import errno,socket
 try:
@@ -286,7 +292,7 @@ except OSError as e:
     if [[ -d /proc/sys/net && ! -e /proc/net/if_inet6 ]] || [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 && $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6) == 1 ]]; then listen=0.0.0.0; fi
     if [[ $listen == 0.0.0.0 ]] && jq -e '.nodes|any(.address|contains(":"))' "$1" >/dev/null; then _protocol_error '当前服务器 IPv6 不可用'; return 1; fi
     jq -e '.schema_version==1 and (.nodes|type=="array") and (.nodes|length<=128) and (.nodes|map(.id)|length==(unique|length)) and (.nodes|map(.port)|length==(unique|length))' "$1" >/dev/null || return 1
-    while IFS= read -r node; do protocol_validate_node "$node" || return 1; done < <(jq -c '.nodes[]' "$1")
+    while IFS= read -r node; do protocol_validate_node "$node" "$mode" || return 1; done < <(jq -c '.nodes[]' "$1")
     (umask 077; : > "$2"; chmod 600 "$2" || exit 1
     jq --arg listen "$listen" '{log:{level:"warn",timestamp:true},inbounds:[.nodes[]|select(.type=="anytls" or .type=="hysteria2" or .type=="tuicv5")|
       {type:(if .type=="tuicv5" then "tuic" else .type end),tag:("node-"+.id),listen:$listen,listen_port:.port,tls:{enabled:true,server_name:.sni,certificate:(.tls_cert|split("\n")),key:(.tls_key|split("\n"))}}+

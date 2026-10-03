@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # xray-manager: the public CLI and compact Chinese terminal interface.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
-    printf '错误：需要 Bash 4.4 或更新版本，请运行 sh install.sh。\n' >&2
+    if [[ -t 2 && -z ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
+        printf '\033[91m[错误]\033[0m 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\n' >&2
+    else
+        printf '[错误] 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\n' >&2
+    fi
     exit 1
 fi
 XM_CODE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
@@ -250,7 +254,7 @@ xm_edit() {
     [[ $actual == "$original" ]] || { xm_error '节点信息已变化，请重新选择并编辑。'; return 1; }
     xm_selected_unchanged "$id" && protocol_validate_node "$candidate" && xm_edit_conflicts "$original" "$candidate" && xm_work_begin || return 1
     jq --arg id "$id" --slurpfile state "$XM_STATE" '. as $node | $state[0] | .nodes|=map(if .id==$id then $node else . end)' <<< "$candidate" > "$XM_WORK_DIR/state.json" || return 1
-    state_apply "$XM_WORK_DIR/state.json" || return 1
+    state_apply "$XM_WORK_DIR/state.json" "" maintenance || return 1
     xm_success "节点 $id 已更新，ID 与类型保持不变。"
 }
 xm_edit_secret() {
@@ -354,7 +358,7 @@ xm_delete() {
     xm_confirm "删除节点 $1？" || return 2
     xm_selected_unchanged "$1" || return 1
     jq --arg id "$1" '.nodes |= map(select(.id != $id))' "$XM_STATE" > "$XM_WORK_DIR/state.json" || return 1
-    state_apply "$XM_WORK_DIR/state.json" || return 1
+    state_apply "$XM_WORK_DIR/state.json" "" maintenance || return 1
     xm_success "节点 $1 已删除。"
 }
 xm_share() {

@@ -12,6 +12,26 @@ _platform_info() {
 _platform_warning() {
     if declare -F xm_warning >/dev/null; then xm_warning "$*"; else printf '[警告] %s\n' "$*" >&2; fi
 }
+# Human-only Python diagnostics use the same palette/TTY policy as Common.
+# Colors travel as fixed environment values, never in secret-bearing argv.
+_platform_python() (
+    set -o pipefail
+    export _XM_PY_CYAN='' _XM_PY_YELLOW='' _XM_PY_RED='' _XM_PY_RESET=''
+    if [[ -t 2 && ! ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
+        _XM_PY_CYAN=$'\033[96m'; _XM_PY_YELLOW=$'\033[93m'; _XM_PY_RED=$'\033[91m'; _XM_PY_RESET=$'\033[0m'
+    fi
+    {
+        cat <<'PYLABEL'
+import os, sys
+def human(kind, message):
+    color = os.environ.get({'信息':'_XM_PY_CYAN','警告':'_XM_PY_YELLOW','错误':'_XM_PY_RED'}[kind], '')
+    reset = os.environ.get('_XM_PY_RESET', '') if color else ''
+    print(color + '[' + kind + '] ' + str(message) + reset, file=sys.stderr, flush=True)
+PYLABEL
+        cat
+    } | python3 "$@"
+)
+
 _platform_root() {
     [[ ${EUID:-$(id -u)} -eq 0 ]] || { _platform_error '此操作需要 root。'; return 1; }
 }
@@ -78,6 +98,7 @@ platform_dependencies() {
     _platform_real || return 1
     platform_detect || return 1
     _platform_dependency_begin || return 1
+    _platform_info '检查并安装平台依赖。'
     local cmd missing=0
     for cmd in curl jq unzip openssl python3 flock ss logrotate; do
         command -v "$cmd" >/dev/null 2>&1 || missing=1
@@ -162,7 +183,7 @@ platform_fetch_core() (
     url="https://github.com/XTLS/Xray-core/releases/download/$version/$asset"
     curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --output "$tmp/core.zip" "$url" || return 1
     curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 60 --max-filesize 16384 --output "$tmp/core.dgst" "$url.dgst" || return 1
-    python3 - "$tmp/core.zip" "$tmp/core.dgst" "$tmp/xray" "$XM_ARCH" <<'PY'
+    _platform_python - "$tmp/core.zip" "$tmp/core.dgst" "$tmp/xray" "$XM_ARCH" <<'PY'
 import hashlib, pathlib, re, stat, struct, sys, zipfile
 archive, digest, output, arch = sys.argv[1:]
 try:
@@ -203,7 +224,7 @@ try:
             for data in iter(lambda: src.read(1024 * 1024), b''):
                 target.write(data)
 except Exception as e:
-    print('核心验证失败：' + str(e), file=sys.stderr)
+    human('错误', '核心验证失败：' + str(e))
     sys.exit(1)
 PY
     [[ $? -eq 0 ]] || return 1
@@ -316,7 +337,7 @@ platform_port_available() {
 }
 
 _platform_core_pid() {
-    python3 - "$XM_BIN" <<'PYCORE'
+    _platform_python - "$XM_BIN" <<'PYCORE'
 import glob, os, pwd, sys
 try:
     uid = pwd.getpwnam('xray-manager').pw_uid
@@ -331,7 +352,7 @@ try:
         raise ValueError('expected one dedicated Xray process')
     print(found[0])
 except Exception as e:
-    print('核心进程检查失败：' + str(e), file=sys.stderr)
+    human('错误', '核心进程检查失败：' + str(e))
     sys.exit(1)
 PYCORE
 }
@@ -379,7 +400,7 @@ platform_release_choices() (
             "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=100&page=$page"; then
             _platform_error '无法查询 Xray 官方版本（网络失败或 API 限流），请稍后重试。'; return 1
         fi
-        count=$(python3 - "$tmp/page.json" "$tmp/records.json" <<'PYRELEASE'
+        count=$(_platform_python - "$tmp/page.json" "$tmp/records.json" <<'PYRELEASE'
 import datetime, json, pathlib, re, sys
 page, records = map(pathlib.Path, sys.argv[1:])
 try:
@@ -412,17 +433,17 @@ try:
         seen.add(tag)
         previous.append({'channel': 'preview' if release['prerelease'] else 'stable', 'tag': tag, 'published': published})
     if unsupported:
-        print('提示：已过滤不支持的版本标签；本脚本支持 v数字.数字.数字。', file=sys.stderr)
+        human('信息', '已过滤不支持的版本标签；本脚本支持 v数字.数字.数字。')
     records.write_text(json.dumps(previous), encoding='utf-8')
     print(len(releases))
 except Exception as e:
-    print('官方版本响应验证失败：' + str(e), file=sys.stderr)
+    human('错误', '官方版本响应验证失败：' + str(e))
     sys.exit(1)
 PYRELEASE
         ) || return 1
         rm -f -- "$tmp/page.json" || return 1
         if ((count < 100)); then
-            python3 - "$tmp/records.json" <<'PYCHOICES'
+            _platform_python - "$tmp/records.json" <<'PYCHOICES'
 import json, sys
 records = json.load(open(sys.argv[1], encoding='utf-8'))
 lines = []
@@ -431,7 +452,7 @@ for channel in ('stable', 'preview'):
     for r in choices:
         lines.append('\t'.join((channel, r['tag'], r['published'])))
 if not lines:
-    print('官方版本列表没有可用的 v数字.数字.数字 版本。', file=sys.stderr)
+    human('错误', '官方版本列表没有可用的 v数字.数字.数字 版本。')
     sys.exit(1)
 print('\n'.join(lines))
 PYCHOICES
@@ -453,7 +474,7 @@ platform_public_ip() (
             --output "$tmp/address" "$url"; then
             continue
         fi
-        address=$(python3 - "$tmp/address" <<'PYADDRESS'
+        address=$(_platform_python - "$tmp/address" <<'PYADDRESS'
 import ipaddress, pathlib, re, sys
 try:
     raw = pathlib.Path(sys.argv[1]).read_bytes()
@@ -486,7 +507,7 @@ platform_random_port() (
     command -v ss >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || { _platform_error '随机端口需要 ss 和 openssl。'; return 1; }
     if [[ -e $state || -L $state || $# -eq 1 ]]; then
         [[ -f $state && -r $state && ! -L $state ]] || { _platform_error '无法安全读取节点状态，未生成随机端口。'; return 1; }
-        used=$(python3 - "$state" <<'PYPORTS'
+        used=$(_platform_python - "$state" <<'PYPORTS'
 import json, pathlib, sys
 try:
     p = pathlib.Path(sys.argv[1])
@@ -502,7 +523,7 @@ try:
         ports.append(str(node['port']))
     print(' '.join(ports))
 except Exception as e:
-    print('节点端口读取失败：' + str(e), file=sys.stderr)
+    human('错误', '节点端口读取失败：' + str(e))
     sys.exit(1)
 PYPORTS
         ) || return 1
@@ -618,7 +639,7 @@ _platform_schedule_read_time() {
     printf '%s\n' "$time"
 }
 _platform_schedule_local_next() {
-    python3 - "${1:--}" <<'PYNEXT'
+    _platform_python - "${1:--}" <<'PYNEXT'
 import datetime, os, time, sys
 os.environ.pop('TZ', None)
 time.tzset()
@@ -820,7 +841,7 @@ platform_extra_ensure() (
     local tmp asset digest version
     if [[ -e $XM_EXTRA_BIN ]]; then
         [[ -x $XM_EXTRA_BIN && -f $XM_ETC/extra-core.sha256 ]] || { _platform_error '现有辅助核心缺少本项目校验记录，拒绝接管。'; return 1; }
-        python3 - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
+        _platform_python - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
 import hashlib,pathlib,re,sys
 b,p=map(pathlib.Path,sys.argv[1:])
 if p.stat().st_size>128:sys.exit(1)
@@ -839,6 +860,7 @@ PY
     [[ -n $asset && $digest =~ ^[0-9a-f]{64}$ ]] || return 1
     tmp=$(umask 077; mktemp -d "$XM_ETC/.extra-download.XXXXXXXX") || return 1
     trap 'rm -rf -- "$tmp"' EXIT
+    _platform_info '获取并校验辅助核心 sing-box 1.14.2。'
     curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --output "$tmp/core.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/$asset.tar.gz" || return 1
     _platform_extra_verify_archive "$tmp/core.tar.gz" "$digest" "$asset" "$XM_ARCH" "$tmp/core" "$tmp/hash"
     [[ $? == 0 ]] || return 1
@@ -920,7 +942,7 @@ platform_extra_health() {
     _platform_extra_paths || return 1
     platform_extra_service status >/dev/null 2>&1 || { _platform_error '辅助服务未运行。'; return 1; }
     local pid after nodes port type sockets
-    pid=$(python3 - "$XM_EXTRA_BIN" <<'PY'
+    pid=$(_platform_python - "$XM_EXTRA_BIN" <<'PY'
 import glob,os,pwd,sys
 uid=pwd.getpwnam('xray-manager').pw_uid;pids=[]
 for p in glob.glob('/proc/[0-9]*'):
@@ -987,7 +1009,7 @@ _platform_dependency_record() {
     tmp=$(umask 077; mktemp -d "$XM_ETC/.dependency-ledger.XXXXXXXX") || return 1
     printf '%s\n' "$_XM_DEPENDENCY_BEFORE" > "$tmp/before" || { rm -rf "$tmp"; return 1; }
     _platform_package_inventory > "$tmp/after" || { rm -rf "$tmp"; return 1; }
-    python3 - "$tmp/before" "$tmp/after" "$target" "$tmp/new" <<'PY'
+    _platform_python - "$tmp/before" "$tmp/after" "$target" "$tmp/new" <<'PY'
 import json,pathlib,re,sys
 before,after,target,out=map(pathlib.Path,sys.argv[1:])
 try:
@@ -1006,7 +1028,7 @@ try:
   added=(set(old['added']) | added)-baseline
  else: baseline=set(b['packages'])
  out.write_text(json.dumps({'owner':'xray-manager:1','os':a['os'],'baseline':sorted(baseline),'added':sorted(added)})+'\n')
-except Exception as e: print('依赖记录错误：'+str(e),file=sys.stderr);sys.exit(1)
+except Exception as e: human('错误', '依赖记录错误：'+str(e));sys.exit(1)
 PY
     local result=$?
     if ((result == 0)); then chmod 0600 "$tmp/new" && chown root:root "$tmp/new" && mv -f -- "$tmp/new" "$target" || result=1; fi
@@ -1019,7 +1041,7 @@ PY
 _platform_dependency_plan() {
     local ledger=$1
     _platform_no_symlink "$ledger" && [[ -f $ledger && $(wc -c < "$ledger") -le 1048576 ]] || return 1
-    python3 - "$ledger" "${XM_OS:-}" <<'PY'
+    _platform_python - "$ledger" "${XM_OS:-}" <<'PY'
 import json,pathlib,re,subprocess,sys
 try:
  j=json.loads(pathlib.Path(sys.argv[1]).read_text());osname=sys.argv[2]
@@ -1063,7 +1085,7 @@ try:
    if deps-candidates:
     candidates.remove(p);changed=True
  retained=(set(j['added']) & installed)-candidates
- if retained:print('[警告] 保留系统/共享/登录Shell依赖：'+', '.join(sorted(retained)),file=sys.stderr)
+ if retained:human('警告', '保留系统/共享/登录Shell依赖：'+', '.join(sorted(retained)))
  if not candidates:sys.exit(0)
  names=sorted(candidates)
  argv=['apt-get','--simulate','--no-auto-remove','purge','--']+names if osname=='debian' else ['apk','del','--simulate','--']+names
@@ -1077,7 +1099,7 @@ try:
    assert len(matches)==1,'ambiguous removal';removed.update(matches)
  assert removed and removed<=candidates,'package simulation would exceed owned additions'
  for p in sorted(removed):print(p)
-except Exception as e:print('依赖卸载计划无法安全确认：'+str(e),file=sys.stderr);sys.exit(1)
+except Exception as e:human('错误', '依赖卸载计划无法安全确认：'+str(e));sys.exit(1)
 PY
 }
 platform_dependency_cleanup() {
@@ -1100,10 +1122,10 @@ _platform_clean_files_preflight() {
     for dir in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do
         _platform_no_symlink "$dir" && _platform_owned_dir "$dir" || { _platform_error "完全卸载拒绝未受管目录：$dir"; return 1; }
     done
-    python3 - "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" <<'PY'
+    _platform_python - "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" <<'PY'
 import pathlib,re,sys
 home,etc,data,logs=map(pathlib.Path,sys.argv[1:])
-allowed={home:{'.xray-manager-owned','xray-manager.sh','install.sh','bin','lib','assets'},home/'bin':{'xray','xray.previous','sing-box'},home/'lib':{'common.sh','state.sh','platform.sh','protocol.sh'},home/'assets':{'xy','xray-manager.service','xray-manager.openrc','xray-manager.logrotate','xray-manager-restart.service','xray-manager-restart.timer','xray-manager-restart.openrc','xray-manager-restart.py','xray-manager-extra.service','xray-manager-extra.openrc'},etc:{'.xray-manager-owned','.manager.lock','state.json','config.json','extra.json','extra-core.sha256','core.previous-version','restart-schedule','dependency-ledger.json','last-error.log','last-extra-error.log'},data:{'.xray-manager-owned','.xray-manager-account'},logs:{'.xray-manager-owned','console.log','extra-console.log','restart-schedule.log'}}
+allowed={home:{'.xray-manager-owned','xray-manager.sh','install.sh','bin','lib','assets'},home/'bin':{'xray','xray.previous','sing-box'},home/'lib':{'common.sh','state.sh','platform.sh','protocol.sh'},home/'assets':{'xy','xray-manager.service','xray-manager.openrc','xray-manager.logrotate','xray-manager-restart.service','xray-manager-restart.timer','xray-manager-restart.openrc','xray-manager-restart.py','xray-manager-extra.service','xray-manager-extra.openrc'},etc:{'.xray-manager-owned','.manager.lock','state.json','config.json','extra.json','extra-core.sha256','core.previous-version','restart-schedule','dependency-ledger.json'},data:{'.xray-manager-owned','.xray-manager-account'},logs:{'.xray-manager-owned','console.log','extra-console.log','restart-schedule.log','last-error.log','last-extra-error.log'}}
 try:
  for base in (home,etc,data,logs):
   for p in base.rglob('*'):
@@ -1114,7 +1136,7 @@ try:
    if p.name not in names and not extra and not rotated:raise ValueError('unknown file retained: '+str(p))
    if p.is_dir() and p not in allowed:raise ValueError('unexpected directory '+str(p))
    if not(p.is_dir() or p.is_file()):raise ValueError('non-regular file '+str(p))
-except Exception as e:print('完全卸载预检失败：'+str(e),file=sys.stderr);sys.exit(1)
+except Exception as e:human('错误', '完全卸载预检失败：'+str(e));sys.exit(1)
 PY
 }
 _platform_clean_account_preflight() {
@@ -1130,7 +1152,7 @@ _platform_clean_account_preflight() {
     while IFS=: read -r name _ other_uid other_gid _; do
         [[ $name == xray-manager || ( $other_uid != "$uid" && $other_gid != "$gid" ) ]] || { _platform_error '专用 UID/GID 被外部账户共享。'; return 1; }
     done < <(getent passwd)
-    python3 - "$uid" "$XM_BIN" "$XM_HOME/bin/sing-box" <<'PY'
+    _platform_python - "$uid" "$XM_BIN" "$XM_HOME/bin/sing-box" <<'PY'
 import glob,os,sys
 uid=int(sys.argv[1]);allowed=set(sys.argv[2:])
 for p in glob.glob('/proc/[0-9]*'):
@@ -1173,7 +1195,7 @@ platform_clean_uninstall() (
         fi
         uid=$(getent passwd xray-manager | cut -d: -f3 || true)
         if [[ -n $uid ]]; then
-            python3 - "$uid" <<'PYQUIET'
+            _platform_python - "$uid" <<'PYQUIET'
 import glob,os,sys
 uid=int(sys.argv[1])
 for p in glob.glob('/proc/[0-9]*'):
@@ -1191,7 +1213,7 @@ PYQUIET
     # Revalidate all leaves immediately before deleting. Unknown files always stop
     # cleanup; no recursive rm of an unchecked directory is used.
     _platform_clean_files_preflight || return 1
-    python3 - "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" <<'PY'
+    _platform_python - "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" <<'PY'
 import pathlib,sys
 for path in map(pathlib.Path,sys.argv[1:]):
  for p in sorted(path.rglob('*'),key=lambda p:len(p.parts),reverse=True):
@@ -1208,7 +1230,7 @@ PY
 )
 
 _platform_extra_verify_archive() {
-    python3 - "$@" <<'PY'
+    _platform_python - "$@" <<'PY'
 import hashlib,pathlib,struct,sys,tarfile
 archive,digest,folder,arch,out,hfile=sys.argv[1:]
 try:
@@ -1233,7 +1255,7 @@ try:
             for chunk in iter(lambda:src.read(1024*1024),b''):f.write(chunk);h.update(chunk)
         pathlib.Path(hfile).write_text(h.hexdigest()+'\n')
 except Exception as e:
-    print('辅助核心校验失败：'+str(e),file=sys.stderr);sys.exit(1)
+    human('错误', '辅助核心校验失败：'+str(e));sys.exit(1)
 PY
 }
 _platform_main_resource_preflight() {
@@ -1279,7 +1301,7 @@ platform_extra_discard_new() {
     if [[ $1 == 0 && ( -e $XM_EXTRA_BIN || -L $XM_EXTRA_BIN ) ]]; then
         _platform_no_symlink "$XM_EXTRA_BIN" && _platform_no_symlink "$XM_ETC/extra-core.sha256" || return 1
         [[ -f $XM_EXTRA_BIN && -f $XM_ETC/extra-core.sha256 ]] || return 1
-        python3 - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
+        _platform_python - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
 import hashlib,pathlib,re,sys
 b,p=map(pathlib.Path,sys.argv[1:]);assert p.stat().st_size<=128
 h=p.read_text().strip();actual=hashlib.sha256()

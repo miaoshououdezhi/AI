@@ -2,11 +2,22 @@
 # Standalone remote bootstrap. Run locally with: sh deploy.sh
 # Runtime modules are fetched from a fixed, verified project commit.
 set -eu
-[ "$#" -eq 0 ] || { printf "%s\n" "[错误] 用法：sh deploy.sh" >&2; exit 2; }
-[ "$(id -u)" -eq 0 ] || { printf "%s\n" "[错误] 请先切换到 root 再执行。" >&2; exit 1; }
+# Human messages stay on stderr; bootstrap needs neither Bash nor tput.
+xray_boot_message() {
+    xray_boot_color=$1; xray_boot_label=$2; shift 2
+    if [ -t 2 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then
+        printf '\033[%sm[%s]\033[0m %s\n' "$xray_boot_color" "$xray_boot_label" "$*" >&2
+    else
+        printf '[%s] %s\n' "$xray_boot_label" "$*" >&2
+    fi
+}
+xray_boot_error() { xray_boot_message 91 '错误' "$@"; }
+xray_boot_info() { xray_boot_message 96 '信息' "$@"; }
+[ "$#" -eq 0 ] || { xray_boot_error '用法：sh deploy.sh'; exit 2; }
+[ "$(id -u)" -eq 0 ] || { xray_boot_error '请先切换到 root 再执行。'; exit 1; }
 case $(uname -m) in
   x86_64|aarch64|arm64) ;;
-  *) printf "%s\n" "[错误] 仅支持 amd64 和 arm64 架构。" >&2; exit 1 ;;
+  *) xray_boot_error '仅支持 amd64 和 arm64 架构。'; exit 1 ;;
 esac
 . /etc/os-release
 umask 077
@@ -46,10 +57,10 @@ xray_package_snapshot() {
     rm -f -- "$xray_snapshot_list"
 }
 
-case "$ID:$VERSION_ID" in debian:12|debian:13|alpine:3.23|alpine:3.23.*|alpine:3.24|alpine:3.24.*) ;; *) printf "[错误] 不支持此系统。\n" >&2; exit 1 ;; esac
-xray_package_snapshot "$ID" "$xray_tmp/dependency-snapshot.json" || { printf "[错误] 无法记录安装前依赖，未安装软件包。\n" >&2; exit 1; }
+case "$ID:$VERSION_ID" in debian:12|debian:13|alpine:3.23|alpine:3.23.*|alpine:3.24|alpine:3.24.*) ;; *) xray_boot_error '不支持此系统。'; exit 1 ;; esac
+xray_package_snapshot "$ID" "$xray_tmp/dependency-snapshot.json" || { xray_boot_error '无法记录安装前依赖，未安装软件包。'; exit 1; }
 export XM_DEPENDENCY_SNAPSHOT_FILE="$xray_tmp/dependency-snapshot.json"
-printf "[信息] 正在准备下载依赖，安装前包基线已记录。\n" >&2
+xray_boot_info '正在准备下载依赖，安装前包基线已记录。'
 case "$ID:$VERSION_ID" in
   debian:12|debian:13)
     apt-get update
@@ -58,11 +69,13 @@ case "$ID:$VERSION_ID" in
   alpine:3.23|alpine:3.23.*|alpine:3.24|alpine:3.24.*)
     apk add --no-cache ca-certificates curl tar gzip
     ;;
-  *) printf "%s\n" "[错误] 仅支持 Debian 12/13 和 Alpine 3.23/3.24。" >&2; exit 1 ;;
+  *) xray_boot_error '仅支持 Debian 12/13 和 Alpine 3.23/3.24。'; exit 1 ;;
 esac
+xray_boot_info '正在下载固定版本的管理脚本。'
 curl --http1.1 --fail --location --proto "=https" --proto-redir "=https" --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 \
   -o "$xray_tmp/project.tar.gz" \
   https://github.com/miaoshououdezhi/AI/archive/54116cdb1c413ea028fc5d1996402a3874149912.tar.gz
+xray_boot_info '正在解压并启动安装。'
 mkdir "$xray_tmp/project"
 tar -xzf "$xray_tmp/project.tar.gz" -C "$xray_tmp/project" --strip-components=1
 sh "$xray_tmp/project/install.sh"
