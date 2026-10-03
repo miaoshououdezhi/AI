@@ -82,7 +82,7 @@ xy --yes import /root/portable-final.json
 systemctl is-active --quiet xray-manager
 systemctl is-active --quiet xray-manager-extra
 printf 'LIFECYCLE_PHASE=CLEANUP\n'
-xy schedule set 23:59
+xy --yes schedule set 23:59
 printf 'foreign\n' > /etc/xray-manager/foreign-file
 if xy --yes uninstall; then exit 43; fi
 systemctl is-active --quiet xray-manager
