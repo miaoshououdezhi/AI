@@ -84,19 +84,16 @@ jobs:
           printf 'QEMU_ACCEL=%s\n' "${accel[*]}" | tee evidence/environment.log
           qemu-system-x86_64 --version | tee -a evidence/environment.log
           set +e
-          # Runner owns the log; sudo is needed only for KVM/disk access.
-          # shellcheck disable=SC2024
           sudo timeout --signal=TERM --kill-after=30 3900 qemu-system-x86_64 \
             -m 2048 -smp 2 "${accel[@]}" -nographic -no-reboot \
             -kernel evidence/vmlinuz -initrd evidence/initrd \
             -append 'root=/dev/vda rw console=ttyS0 systemd.unit=vm-validation.service net.ifnames=0 panic=30' \
             -drive file=evidence/debian.ext4,format=raw,if=virtio \
             -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-            > evidence/serial.log 2>&1
-          qemu_code=$?
+            2>&1 | tee evidence/serial.log
+          qemu_code=${PIPESTATUS[0]}
           set -e
           printf 'QEMU_EXIT=%s\n' "$qemu_code" | tee -a evidence/environment.log
-          cat evidence/serial.log
           [[ $qemu_code == 0 ]]
           tr -d '\r' < evidence/serial.log > evidence/serial-normalized.log
           grep -qx 'SYSTEMD_DUAL_CORE_MIGRATION_CLEANUP_PASS' evidence/serial-normalized.log
