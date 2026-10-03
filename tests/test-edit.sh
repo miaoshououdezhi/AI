@@ -45,12 +45,12 @@ xm_confirm() {
 protocol_new shadowsocks ss-one 'SS one' 28001 8.8.8.8 > "$scratch/ss.json" || fail 'SS fixture'
 protocol_new vless-reality reality-one 'REALITY one' 28002 8.8.4.4 www.cloudflare.com www.cloudflare.com:443 > "$scratch/reality.json" || fail 'REALITY fixture'
 protocol_new vless-xhttp xhttp-one 'XHTTP one' 28003 1.1.1.1 www.cloudflare.com www.cloudflare.com:443 /fixture-path packet-up > "$scratch/xhttp.json" || fail 'XHTTP fixture'
-jq -n --slurpfile a "$scratch/ss.json" --slurpfile b "$scratch/reality.json" --slurpfile c "$scratch/xhttp.json" '{schema_version:1,core_version:"v26.3.27",nodes:[$a[0],$b[0],$c[0]]}' > "$XM_STATE"
+command jq -n --slurpfile a "$scratch/ss.json" --slurpfile b "$scratch/reality.json" --slurpfile c "$scratch/xhttp.json" '{schema_version:1,core_version:"v26.3.27",nodes:[$a[0],$b[0],$c[0]]}' > "$XM_STATE"
 protocol_generate "$XM_STATE" "$XM_CONFIG" || fail 'initial config'
 cp "$XM_STATE" "$scratch/original-state"
 # Intercept actual jq argv while delegating unchanged to the real executable.
 # Known credentials must travel via stdin/private files, never a child argv.
-mapfile -t TEST_SECRET_VALUES < <(jq -r '.nodes[]|.password,.private_key,.public_key,.uuid,.short_id|select(type=="string")' "$XM_STATE")
+mapfile -t TEST_SECRET_VALUES < <(command jq -r '.nodes[]|.password,.private_key,.public_key,.uuid,.short_id|select(type=="string")' "$XM_STATE")
 jq() {
     local argument secret
     for argument in "$@"; do
