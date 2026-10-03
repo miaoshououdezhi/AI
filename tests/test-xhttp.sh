@@ -58,6 +58,10 @@ p=pathlib.Path(sys.argv[1]); sockets=[]; ports=[]
 for _ in range(3):
  s=socket.socket(); s.bind(('127.0.0.1',0)); sockets.append(s); ports.append(s.getsockname()[1])
 n=json.loads((p/'current.json').read_text()); cfg=json.loads((p/'server.json').read_text()); cfg['inbounds'][0].update(listen='127.0.0.1',port=ports[0]); cfg['routing']['rules']=[]
+# Recent previews add freedom private-address protection independently of routing.
+# Permit only this fixture IP and exact temporary port in this test copy.
+# Older stable cores ignore the unsupported finalRules key.
+cfg['outbounds'][0]['settings']={'finalRules':[{'action':'allow','ip':['127.0.0.1/32'],'port':str(ports[2])}]}
 client={'log':{'loglevel':'warning'},'inbounds':[{'listen':'127.0.0.1','port':ports[1],'protocol':'socks','settings':{'auth':'noauth','udp':False}}],'outbounds':[{'protocol':'vless','settings':{'vnext':[{'address':'127.0.0.1','port':ports[0],'users':[{'id':n['uuid'],'encryption':'none'}]}]},'streamSettings':{'network':'xhttp','security':'reality','xhttpSettings':{'path':n['path'],'mode':n['mode']},'realitySettings':{'serverName':n['sni'],'fingerprint':'chrome','password':n['public_key'],'shortId':n['short_id']}}}]}
 (p/'server.json').write_text(json.dumps(cfg)); (p/'client.json').write_text(json.dumps(client)); (p/'ports').write_text('\n'.join(map(str,ports))+'\n'); (p/'payload').write_text('xray-manager-xhttp-e2e\n')
 for s in sockets:s.close()
