@@ -2,7 +2,7 @@
 # xray-manager: the public CLI and compact Chinese terminal interface.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
     if [[ -t 2 && -z ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
-        printf '\033[91m[错误]\033[0m 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\n' >&2
+        printf '\033[91m[错误] 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\033[0m\n' >&2
     else
         printf '[错误] 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\n' >&2
     fi
@@ -114,12 +114,20 @@ xm_retire_trojan() {
 }
 
 xm_install() {
-    local version=${1:-$XM_DEFAULT_CORE_VERSION}
+    local version=${1:-$XM_DEFAULT_CORE_VERSION} refresh_extra=0
     (($# <= 1)) || { xm_usage_error 'install 最多接受一个版本参数。'; return 2; }
     xm_version_valid "$version" || return $?
     xm_require_root && platform_detect && platform_shortcut_preflight && platform_dependencies_snapshot && platform_dependencies && platform_prepare && xm_lock || return 1
     if [[ -f $XM_STATE ]]; then
-        xm_installed && xm_retire_trojan && xm_install_code && platform_install_service && platform_shortcut_install || return 1
+        xm_installed || return 1
+        if [[ -e $XM_EXTRA_BIN || -L $XM_EXTRA_BIN ]]; then
+            platform_extra_ensure && platform_extra_preflight || return 1
+            refresh_extra=1
+        fi
+        xm_retire_trojan && xm_install_code && platform_install_service || return 1
+        # Re-register owned service definitions without start/enable actions.
+        if [[ $refresh_extra == 1 ]]; then platform_extra_install_service || return 1; fi
+        platform_shortcut_install || return 1
         xm_success "已安装核心 $(jq -r .core_version "$XM_STATE")；保留节点。更换核心请使用 upgrade。入口：xy。"
         return 0
     fi

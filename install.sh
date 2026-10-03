@@ -5,7 +5,7 @@ set -u
 xray_boot_message() {
     xray_boot_color=$1; xray_boot_label=$2; shift 2
     if [ -t 2 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-dumb}" != dumb ]; then
-        printf '\033[%sm[%s]\033[0m %s\n' "$xray_boot_color" "$xray_boot_label" "$*" >&2
+        printf '\033[%sm[%s] %s\033[0m\n' "$xray_boot_color" "$xray_boot_label" "$*" >&2
     else
         printf '[%s] %s\n' "$xray_boot_label" "$*" >&2
     fi

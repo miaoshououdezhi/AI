@@ -36,6 +36,8 @@ reject platform_extra_ensure
 reject platform_extra_service bad
 # Ensure service templates keep the shared nonroot account and native check.
 grep -q '^User=xray-manager$' "$repo/assets/xray-manager-extra.service" || fail 'nonroot systemd'
+grep -q '^RestrictAddressFamilies=.*AF_NETLINK' "$repo/assets/xray-manager-extra.service" || fail 'sing-box interface monitor netlink family'
+if grep -q '^RestrictAddressFamilies=.*AF_NETLINK' "$repo/assets/xray-manager.service"; then fail 'main Xray address families changed'; fi
 grep -q 'sing-box check -c' "$repo/assets/xray-manager-extra.openrc" || fail 'native OpenRC check'
 printf 'PASS: pinned extra asset matrix, real archive/digest/ELF parser negatives, host isolation and service contracts\n'
 # Rollback removes only newly created verified artifacts. Init operations below

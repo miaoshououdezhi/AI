@@ -16,7 +16,7 @@ XM_TEMP_DIR=
 XM_LOCK_FD=
 XM_YES=0
 
-xm_message() { printf '%s[%s]%s %s\n' "$1" "$2" "${XM_UI_RESET:-}" "$3" >&2; }
+xm_message() { printf '%s[%s] %s%s\n' "$1" "$2" "$3" "${XM_UI_RESET:-}" >&2; }
 xm_info() { xm_message "${XM_UI_CYAN:-}" 信息 "$*"; }
 xm_success() { xm_message "${XM_UI_GREEN:-}" 成功 "$*"; }
 xm_ok() { xm_message "${XM_UI_GREEN:-}" OK "$*"; }

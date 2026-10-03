@@ -37,8 +37,8 @@ for mode in ('color','no_color','dumb'):
  assert sent and p.wait(timeout=2)==0 and b'RETURNED' in data,(mode,data)
  os.close(master)
  if mode=='color':
-  for label,color in [('信息',96),('成功',92),('OK',92),('警告',93),('错误',91)]:
-   assert ('\x1b[%sm[%s]'%(color,label)).encode() in data,(mode,label,data)
+  for label,color,body in [('信息',96,'info'),('成功',92,'success'),('OK',92,'ok'),('警告',93,'warning'),('错误',91,'error')]:
+   assert ('\x1b[%sm[%s] %s\x1b[0m'%(color,label,body)).encode() in data,(mode,label,data)
  else:assert b'\x1b[' not in data,(mode,data)
 print('PASS real PTY bright labels, NO_COLOR/dumb and single-key return')
 PY

@@ -197,5 +197,27 @@ pass 'uninstall refuses ancestor symlink before service changes or deletion'
     cmp "$XM_STATE" "$ROOT/migration-unknown" || fail 'unknown type mutated'
     [[ ! -e $ROOT/migration-code ]] || fail 'unknown type updated code'
     xm_work_end; xm_unlock
+    # A repeat install must refresh an obsolete owned auxiliary unit, while
+    # stopped/enabled flags and the existing primary service remain untouched.
+    make_legacy
+    jq '.nodes|=map(select(.type!="trojan"))' "$XM_STATE" > "$ROOT/repeat-state"
+    cp "$ROOT/repeat-state" "$XM_STATE"
+    printf 'old auxiliary definition\n' > "$ROOT/extra-unit"
+    printf 'fixture owned auxiliary binary\n' > "$XM_EXTRA_BIN"
+    MOCK_RUNNING=0; MOCK_EXTRA_RUNNING=0; MOCK_EXTRA_ENABLED=1
+    platform_extra_ensure() { [[ $(cat "$XM_EXTRA_BIN") == 'fixture owned auxiliary binary' ]]; }
+    platform_extra_preflight() { [[ -f $ROOT/extra-unit && ! -L $ROOT/extra-unit ]]; }
+    platform_extra_install_service() { cp "$REPO/assets/xray-manager-extra.service" "$ROOT/extra-unit"; }
+    platform_extra_service() { fail 'repeat install changed auxiliary running/enabled state'; }
+    xm_install || fail 'repeat install with owned auxiliary core'
+    cmp "$REPO/assets/xray-manager-extra.service" "$ROOT/extra-unit" || fail 'repeat install did not update auxiliary definition'
+    [[ $MOCK_RUNNING == 0 && $MOCK_EXTRA_RUNNING == 0 && $MOCK_EXTRA_ENABLED == 1 ]] || fail 'repeat install changed service flags'
+    xm_work_end; xm_unlock
+    printf 'foreign binary\n' > "$XM_EXTRA_BIN"
+    printf 'old auxiliary definition\n' > "$ROOT/extra-unit"
+    rm -f "$ROOT/migration-code"
+    if xm_install; then fail 'repeat install accepted foreign auxiliary core'; fi
+    [[ ! -e $ROOT/migration-code && $(cat "$ROOT/extra-unit") == 'old auxiliary definition' ]] || fail 'foreign auxiliary core allowed code/unit update'
+    xm_work_end; xm_unlock
 ) || fail 'retirement migration regression block failed'
 pass 'retirement validates supported nodes, preserves private original backup, rolls back health failure and refuses unknown type'

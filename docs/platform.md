@@ -6,7 +6,7 @@ Xray 使用专属非登录账户 `xray-manager`，程序、配置、数据和日
 
 AnyTLS、Hysteria2、TUICv5 使用独立 sing-box 辅助核心，不伪装成 Xray 原生协议。辅助核心固定 1.14.2，来自 SagerNet/sing-box 官方发布，分别选择 amd64/arm64 的 glibc/musl 资产；四个归档 SHA256 固定在平台模块。先验证固定摘要，再安全读取归档并验证 ELF/版本，原子创建 binary 及私密完整性记录。已有辅助核心必须匹配本项目完整性记录，拒绝接管未知二进制。下载校验使用分块读取，避免小内存 VPS 的不必要峰值。辅助核心按需安装，未配置辅助节点时不自动启动。
 
-辅助服务名 `xray-manager-extra`，共用非 root 专用账户，配置 `/etc/xray-manager/extra.json`，程序 `/opt/xray-manager/bin/sing-box`。两个 systemd 服务只提供 CAP_NET_BIND_SERVICE，限制系统写入范围；OpenRC 用 setpriv 继承同等权限。服务模板安装不自动启动/启用。Shell 事务负责两核心原生校验、独立运行/启用状态恢复；辅助安装失败或首个辅助节点原生校验失败时删除本次新建的 binary/hash/unit，保留原有资源。陌生同名服务、覆盖配置、运行级别链接、PID 符号链接拒绝接管。
+辅助服务名 `xray-manager-extra`，共用非 root 专用账户，配置 `/etc/xray-manager/extra.json`，程序 `/opt/xray-manager/bin/sing-box`。两个 systemd 服务只提供 CAP_NET_BIND_SERVICE，限制系统写入范围；sing-box 辅助服务另允许 AF_NETLINK 地址族，用于默认网络接口监测，不增加 capability，也不改变主 Xray 服务的地址族限制。OpenRC 用 setpriv 继承同等权限。服务模板安装不自动启动/启用。Shell 事务负责两核心原生校验、独立运行/启用状态恢复；辅助安装失败或首个辅助节点原生校验失败时删除本次新建的 binary/hash/unit，保留原有资源。陌生同名服务、覆盖配置、运行级别链接、PID 符号链接拒绝接管。
 
 健康检查要求专用账户和对应 executable 的唯一稳定进程、原生配置有效，以及节点端口归属实际核心 PID。Xray 只检查其节点，Shadowsocks 检查 TCP/UDP；sing-box AnyTLS 检查 TCP，HY2/TUICv5 检查 UDP。配置检查、服务启动、客户端互通是不同证据，验证记录分别说明。日志包含 warning/error，访问日志关闭；OpenRC 原 Xray logrotate 定期检查最多4个轮转文件，并非即时硬上限。辅助和定时服务日志在受管日志目录，完全卸载会删除。
 
