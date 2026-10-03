@@ -25,6 +25,16 @@ jobs:
         run: bash tests/test-interactive.sh
       - name: Node edits and state transactions
         run: bash tests/test-edit.sh
+      - name: Portable migration and dual-core transactions
+        run: bash tests/test-migration.sh
+      - name: Terminal labels and pause behavior
+        run: bash tests/test-ui.sh
+      - name: Complete uninstall ownership and dependency ledger
+        run: bash tests/test-clean-uninstall.sh
+      - name: Auxiliary core platform
+        run: bash tests/test-extra-platform.sh
+      - name: New protocol structures and TLS portability
+        run: bash tests/test-extra-protocol.sh
       - name: Platform tests
         run: bash tests/test-platform.sh
       - name: Restart schedule transactions and daemon
@@ -60,6 +70,11 @@ jobs:
               protocol_generate "$XM_ETC/state.json" "$XM_ETC/config.json" || exit 1
               "$XM_BIN" run -test -config "$XM_ETC/config.json" || exit 1
               XRAY_BIN="$XM_BIN" bash /src/tests/test-xhttp.sh || exit 1
+              primary_smoke_bin=$XM_BIN
+              export XM_ROOT=
+              source /src/lib/common.sh
+              platform_prepare && platform_extra_ensure || exit 1
+              XRAY_BIN="$primary_smoke_bin" XM_EXTRA_BIN="$XM_EXTRA_BIN" bash /src/tests/test-extra-protocol.sh || exit 1
             '\''
           '
 # Container jobs do not claim systemd/OpenRC boot or ARM64 service verification.

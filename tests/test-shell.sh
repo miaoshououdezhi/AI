@@ -17,6 +17,8 @@ xm_lock || fail 'lock first owner'
 if bash -c 'source "$1/lib/common.sh"; xm_lock' -- "$REPO" >/dev/null 2>&1; then fail 'concurrent lock accepted'; fi
 pass 'exclusive lock rejects competing process'
 protocol_validate_node() { jq -e '(.id|type=="string") and (.port|type=="number")' <<< "$1" >/dev/null; }
+protocol_has_extra() { return 1; }
+protocol_generate_extra() { printf '{"inbounds":[]}\n' > "$2"; }
 protocol_generate() { jq '{log:{loglevel:"warning"},inbounds:[],outbounds:[],test_nodes:.nodes}' "$1" > "$2"; }
 MOCK_RUNNING=1
 MOCK_START_FAILURE=0
@@ -129,6 +131,7 @@ pass 'help, unknown command, and EOF handled'
 # delete an outside file or change service state. Only a trusted function is loaded.
 (
     # shellcheck disable=SC1090
+    source "$REPO/lib/platform.sh"
     source <(sed -n '/^xm_uninstall() {/,/^}/p' "$REPO/xray-manager.sh")
     xm_ready() { return 0; }
     xm_confirm() { return 0; }
@@ -156,6 +159,7 @@ pass 'uninstall refuses ancestor symlink before service changes or deletion'
     xm_installed() { return 0; }
     platform_detect() { return 0; }
     platform_shortcut_preflight() { return 0; }
+    platform_dependencies_snapshot() { return 0; }
     platform_dependencies() { return 0; }
     platform_prepare() { return 0; }
     platform_install_service() { return 0; }

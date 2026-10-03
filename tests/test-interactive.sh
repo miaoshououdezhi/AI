@@ -105,11 +105,11 @@ pass 'four releases/dates, explicit second confirmation, manual fallback, return
 xm_ui_init
 COLUMNS=80 xm_menu_render 2> "$TEST_ROOT/wide.log"
 COLUMNS=40 xm_menu_render 2> "$TEST_ROOT/narrow.log"
-[[ $(wc -l < "$TEST_ROOT/wide.log") -le 28 ]] || fail 'wide menu exceeds 28 lines'
+[[ $(wc -l < "$TEST_ROOT/wide.log") -le 32 ]] || fail 'wide menu exceeds 32 lines'
 grep -q '\[1\].*\[2\]' "$TEST_ROOT/wide.log" || fail 'wide menu not two columns'
 if grep -q '\[1\].*\[2\]' "$TEST_ROOT/narrow.log"; then fail 'narrow menu still two columns'; fi
 if LC_ALL=C grep -q $'\033' "$TEST_ROOT/wide.log"; then fail 'non-TTY contains ANSI'; fi
-pass 'wide menu fits 28 lines, narrow menu uses one column, non-TTY output is plain'
+pass 'wide menu fits 32 lines, narrow menu uses one column, non-TTY output is plain'
 
 # Real PTYs verify the TTY gate, NO_COLOR presence, and TERM=dumb behavior.
 python3 - "$TEST_REPO" <<'PY'
@@ -231,8 +231,9 @@ printf 'n\n' > "$TEST_ROOT/input"
 if xm_dispatch schedule disable < "$TEST_ROOT/input" >/dev/null 2>&1; then fail 'schedule decline accepted'; fi
 [[ ! -e $TEST_ROOT/schedule-call ]] || fail 'declined schedule reached platform'
 TEST_RUNNING=0; TEST_RESTARTED=0
-xm_service_call() { [[ $TEST_RUNNING == 1 ]]; }
-xm_service() { TEST_RESTARTED=$((TEST_RESTARTED+1)); }
+xm_service_call() { if [[ $1 == status ]]; then [[ $TEST_RUNNING == 1 ]]; else TEST_RESTARTED=$((TEST_RESTARTED+1)); fi; }
+xm_service_validate() { return 0; }
+platform_health() { return 0; }
 xm_dispatch scheduled-restart >/dev/null 2>&1 || fail 'stopped scheduled runner'
 [[ $TEST_RESTARTED == 0 ]] || fail 'scheduled runner started stopped core'
 TEST_RUNNING=1

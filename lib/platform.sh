@@ -2,7 +2,16 @@
 # Platform adapter. Sourcing this file never installs packages or touches services.
 _XM_PLATFORM_ASSETS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../assets" 2>/dev/null && pwd)"
 
-_platform_error() { printf '平台错误：%s\n' "$*" >&2; return 1; }
+_platform_error() {
+    if declare -F xm_error >/dev/null; then xm_error "平台：$*"; else printf '[错误] 平台：%s\n' "$*" >&2; fi
+    return 1
+}
+_platform_info() {
+    if declare -F xm_info >/dev/null; then xm_info "$*"; else printf '[信息] %s\n' "$*" >&2; fi
+}
+_platform_warning() {
+    if declare -F xm_warning >/dev/null; then xm_warning "$*"; else printf '[警告] %s\n' "$*" >&2; fi
+}
 _platform_root() {
     [[ ${EUID:-$(id -u)} -eq 0 ]] || { _platform_error '此操作需要 root。'; return 1; }
 }
@@ -68,6 +77,7 @@ platform_detect() {
 platform_dependencies() {
     _platform_real || return 1
     platform_detect || return 1
+    _platform_dependency_begin || return 1
     local cmd missing=0
     for cmd in curl jq unzip openssl python3 flock ss logrotate; do
         command -v "$cmd" >/dev/null 2>&1 || missing=1
@@ -86,6 +96,7 @@ platform_dependencies() {
     for cmd in curl jq unzip openssl python3 flock ss logrotate; do
         command -v "$cmd" >/dev/null 2>&1 || { _platform_error "依赖安装后仍缺少 $cmd"; return 1; }
     done
+    _platform_dependency_record
 }
 
 platform_prepare() {
@@ -134,6 +145,7 @@ platform_prepare() {
         printf 'xray-manager:1\n' > "$XM_DATA/.xray-manager-account" || return 1
         chmod 0600 "$XM_DATA/.xray-manager-account" || return 1
         chown root:root "$XM_DATA/.xray-manager-account" "$XM_HOME" "$XM_HOME/bin" || return 1
+        _platform_dependency_record || return 1
     fi
 }
 
@@ -331,7 +343,7 @@ platform_health() {
     [[ -x $XM_BIN && -f $XM_ETC/config.json && -f $XM_ETC/state.json ]] || return 1
     pid=$(_platform_core_pid) || return 1
     "$XM_BIN" run -test -config "$XM_ETC/config.json" >/dev/null 2>&1 || { _platform_error '核心拒绝当前配置。'; return 1; }
-    nodes=$(jq -r '.nodes | if type != "array" then error("nodes must be array") else .[] | [.port,.type] | @tsv end' "$XM_ETC/state.json") || return 1
+    nodes=$(jq -r '.nodes | if type != "array" then error("nodes must be array") else .[] | select(.type!="anytls" and .type!="hysteria2" and .type!="tuicv5") | [.port,.type] | @tsv end' "$XM_ETC/state.json") || return 1
     sleep 1
     platform_service status >/dev/null 2>&1 || { _platform_error 'Xray 启动后退出。'; return 1; }
     pid_after=$(_platform_core_pid) || return 1
@@ -783,4 +795,500 @@ _platform_schedule_pid_preflight() {
         [[ -f $pid ]] || { _platform_error "定时服务 PID 路径不是普通文件：$pid"; return 1; }
         _platform_owned_file "$root/etc/init.d/xray-manager-restart" || { _platform_error "定时服务 PID 文件没有对应受管服务，拒绝接管：$pid"; return 1; }
     fi
+}
+
+# Optional sing-box engine, pinned official archive digests (release v1.14.2).
+_platform_extra_paths() {
+    _platform_paths || return 1
+    XM_EXTRA_BIN=${XM_EXTRA_BIN:-$XM_HOME/bin/sing-box}
+    XM_EXTRA_CONFIG=${XM_EXTRA_CONFIG:-$XM_ETC/extra.json}
+    [[ $XM_EXTRA_BIN == "$XM_HOME/bin/sing-box" && $XM_EXTRA_CONFIG == "$XM_ETC/extra.json" ]] || { _platform_error '辅助核心必须使用固定受管路径。'; return 1; }
+}
+_platform_extra_asset() {
+    case ${XM_ARCH:-}:${XM_LIBC:-} in
+        amd64:glibc) printf 'sing-box-1.14.2-linux-amd64-glibc\t5c7bc18461827b28d0e5ee7e89d33b276d3ff7c818531104c8e8d26d85b0656e\n' ;;
+        amd64:musl) printf 'sing-box-1.14.2-linux-amd64-musl\t8f6cb4bcf94d2b33c65d52e0d5b142db29a938336f1ff7267f397ac3758fc297\n' ;;
+        arm64:glibc) printf 'sing-box-1.14.2-linux-arm64-glibc\t87db5c3a96ebad1c44c0be1fe7955db2f76b8c97bbc0ed62173063d675e078cf\n' ;;
+        arm64:musl) printf 'sing-box-1.14.2-linux-arm64-musl\t675297394f9430cebb72b3c48ba8bce0d6f7c750a9d68a8f7f88c515c8255cd1\n' ;;
+        *) _platform_error '不支持的辅助核心架构/libc。'; return 1 ;;
+    esac
+}
+platform_extra_ensure() (
+    _platform_extra_paths && _platform_real || return 1
+    _platform_owned_dir "$XM_HOME" && _platform_owned_dir "$XM_ETC" || return 1
+    _platform_no_symlink "$XM_EXTRA_BIN" && _platform_no_symlink "$XM_ETC/extra-core.sha256" || return 1
+    local tmp asset digest version
+    if [[ -e $XM_EXTRA_BIN ]]; then
+        [[ -x $XM_EXTRA_BIN && -f $XM_ETC/extra-core.sha256 ]] || { _platform_error '现有辅助核心缺少本项目校验记录，拒绝接管。'; return 1; }
+        python3 - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
+import hashlib,pathlib,re,sys
+b,p=map(pathlib.Path,sys.argv[1:])
+if p.stat().st_size>128:sys.exit(1)
+h=p.read_text().strip();actual=hashlib.sha256()
+with b.open('rb') as f:
+ for data in iter(lambda:f.read(1024*1024),b''):actual.update(data)
+if not re.fullmatch('[0-9a-f]{64}',h) or actual.hexdigest()!=h:sys.exit(1)
+PY
+        [[ $? == 0 ]] || { _platform_error '现有辅助核心完整性检查失败。'; return 1; }
+        version=$("$XM_EXTRA_BIN" version) || return 1
+        [[ ${version%%$'\n'*} == 'sing-box version 1.14.2' ]] || { _platform_error '辅助核心版本必须为 1.14.2。'; return 1; }
+        return 0
+    fi
+    [[ ! -e $XM_ETC/extra-core.sha256 ]] || { _platform_error '辅助核心校验记录存在但核心丢失，请检查受管目录。'; return 1; }
+    IFS=$'\t' read -r asset digest < <(_platform_extra_asset)
+    [[ -n $asset && $digest =~ ^[0-9a-f]{64}$ ]] || return 1
+    tmp=$(umask 077; mktemp -d "$XM_ETC/.extra-download.XXXXXXXX") || return 1
+    trap 'rm -rf -- "$tmp"' EXIT
+    curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --output "$tmp/core.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/$asset.tar.gz" || return 1
+    _platform_extra_verify_archive "$tmp/core.tar.gz" "$digest" "$asset" "$XM_ARCH" "$tmp/core" "$tmp/hash"
+    [[ $? == 0 ]] || return 1
+    chmod 0755 "$tmp/core" && chmod 0600 "$tmp/hash" || return 1
+    version=$("$tmp/core" version) || return 1
+    [[ ${version%%$'\n'*} == 'sing-box version 1.14.2' ]] || { _platform_error '下载辅助核心版本与固定版本不符。'; return 1; }
+    ln -- "$tmp/core" "$XM_EXTRA_BIN" || return 1
+    if ! ln -- "$tmp/hash" "$XM_ETC/extra-core.sha256"; then rm -f -- "$XM_EXTRA_BIN"; return 1; fi
+)
+_platform_extra_service_path() {
+    if [[ $XM_INIT == systemd ]]; then printf /etc/systemd/system/xray-manager-extra.service; else printf /etc/init.d/xray-manager-extra; fi
+}
+platform_extra_preflight() {
+    _platform_extra_paths && _platform_init_available || return 1
+    local file dir link target
+    target=$(_platform_extra_service_path)
+    for dir in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do _platform_owned_dir "$dir" || return 1; done
+    _platform_check_service_file "$target" || return 1
+    if [[ $XM_INIT == systemd ]]; then
+        for dir in /etc/systemd/system /run/systemd/system /usr/lib/systemd/system /lib/systemd/system; do
+            file=$dir/xray-manager-extra.service.d
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "拒绝外部辅助服务覆盖：$file"; return 1; }
+            [[ $dir == /etc/systemd/system || (! -e $dir/xray-manager-extra.service && ! -L $dir/xray-manager-extra.service) ]] || { _platform_error '其他位置有同名辅助服务。'; return 1; }
+        done
+        link=/etc/systemd/system/multi-user.target.wants/xray-manager-extra.service
+    else
+        for dir in /etc /usr/local/etc /lib/rc /usr/lib/rc; do
+            for file in "$dir/conf.d/xray-manager-extra" "$dir/conf.d/xray-manager-extra."*; do [[ ! -e $file && ! -L $file ]] || { _platform_error "拒绝外部辅助服务覆盖：$file"; return 1; }; done
+            [[ $dir == /etc || (! -e $dir/init.d/xray-manager-extra && ! -L $dir/init.d/xray-manager-extra) ]] || { _platform_error '其他位置有同名辅助服务。'; return 1; }
+        done
+        _platform_no_symlink /run/xray-manager-extra.pid || return 1
+        if [[ -e /run/xray-manager-extra.pid ]]; then [[ -f /run/xray-manager-extra.pid ]] && _platform_owned_file "$target" || return 1; fi
+        _platform_no_symlink "$XM_LOG/extra-console.log" || return 1
+        for link in /etc/runlevels/*/xray-manager-extra; do [[ ! -e $link && ! -L $link || $link == /etc/runlevels/default/xray-manager-extra ]] || { _platform_error '辅助服务存在外部运行级别。'; return 1; }; done
+        link=/etc/runlevels/default/xray-manager-extra
+    fi
+    _platform_no_symlink "${link%/*}" || return 1
+    [[ ! -e $link && ! -L $link || (-L $link && $(readlink "$link") == "$target") ]] || { _platform_error '辅助服务开机链接不属于本项目。'; return 1; }
+}
+platform_extra_install_service() {
+    platform_extra_preflight || return 1
+    local asset=xray-manager-extra.openrc target
+    [[ $XM_INIT != systemd ]] || asset=xray-manager-extra.service
+    target=$(_platform_extra_service_path)
+    _platform_install_owned "$_XM_PLATFORM_ASSETS/$asset" "$target" 0755 || return 1
+    [[ $XM_INIT != systemd ]] || _platform_schedule_command systemctl daemon-reload
+}
+platform_extra_service() {
+    local action=${1:-} target
+    case $action in start|stop|restart|status|enable|disable) ;; *) _platform_error '未知辅助服务操作。'; return 2 ;; esac
+    platform_extra_preflight || return 1
+    target=$(_platform_extra_service_path)
+    if [[ ! -e $target ]]; then
+        case $action in stop|disable) return 0 ;; *) return 1 ;; esac
+    fi
+    _platform_owned_file "$target" || return 1
+    if [[ $action == start || $action == restart ]]; then
+        "$XM_EXTRA_BIN" check -c "$XM_EXTRA_CONFIG" >/dev/null || return 1
+    fi
+    if [[ $XM_INIT == systemd ]]; then
+        if [[ $action == status ]]; then systemctl is-active --quiet xray-manager-extra.service; else _platform_schedule_command systemctl "$action" xray-manager-extra.service; fi
+    else
+        case $action in
+            enable) _platform_schedule_command rc-update add xray-manager-extra default ;;
+            disable) [[ ! -L /etc/runlevels/default/xray-manager-extra ]] || _platform_schedule_command rc-update del xray-manager-extra default ;;
+            *) _platform_schedule_command rc-service xray-manager-extra "$action" ;;
+        esac
+    fi
+}
+platform_extra_remove_service() {
+    platform_extra_preflight || return 1
+    platform_extra_service stop && platform_extra_service disable || return 1
+    local target
+    target=$(_platform_extra_service_path)
+    rm -f -- "$target" || return 1
+    [[ $XM_INIT != systemd ]] || _platform_schedule_command systemctl daemon-reload
+}
+platform_extra_health() {
+    _platform_extra_paths || return 1
+    platform_extra_service status >/dev/null 2>&1 || { _platform_error '辅助服务未运行。'; return 1; }
+    local pid after nodes port type sockets
+    pid=$(python3 - "$XM_EXTRA_BIN" <<'PY'
+import glob,os,pwd,sys
+uid=pwd.getpwnam('xray-manager').pw_uid;pids=[]
+for p in glob.glob('/proc/[0-9]*'):
+ try:
+  if os.stat(p).st_uid==uid and os.readlink(p+'/exe')==sys.argv[1]:pids.append(p.rsplit('/',1)[-1])
+ except (OSError,PermissionError):pass
+if len(pids)!=1:sys.exit(1)
+print(pids[0])
+PY
+    ) || return 1
+    "$XM_EXTRA_BIN" check -c "$XM_EXTRA_CONFIG" >/dev/null 2>&1 || return 1
+    sleep 1
+    after=$(readlink "/proc/$pid/exe") || return 1
+    [[ $after == "$XM_EXTRA_BIN" ]] && platform_extra_service status >/dev/null 2>&1 || return 1
+    nodes=$(jq -r '.nodes[] | select(.type=="anytls" or .type=="hysteria2" or .type=="tuicv5") | [.port,.type] | @tsv' "$XM_ETC/state.json") || return 1
+    while IFS=$'\t' read -r port type; do
+        [[ -n $port ]] || continue
+        [[ $port =~ ^[0-9]{1,5}$ ]] && ((10#$port>=1 && 10#$port<=65535)) || return 1
+        if [[ $type == anytls ]]; then sockets=$(ss -H -ltnp "sport = :$port"); else sockets=$(ss -H -lunp "sport = :$port"); fi
+        [[ $sockets == *"pid=$pid,"* ]] || { _platform_error "辅助核心未监听 $type 端口 $port。"; return 1; }
+    done <<< "$nodes"
+}
+platform_extra_enabled() {
+    platform_extra_preflight || return 1
+    if [[ $XM_INIT == systemd ]]; then systemctl is-enabled --quiet xray-manager-extra.service; else [[ -L /etc/runlevels/default/xray-manager-extra ]]; fi
+}
+
+# Package inventory and addition ledger: data only, never source package names.
+_platform_package_inventory() (
+    set -o pipefail
+    case ${XM_OS:-} in
+        debian) dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n' | awk -F '\t' '$2=="installed" {print $1}' ;;
+        alpine) apk info ;;
+        *) return 1 ;;
+    esac | awk -v osname="$XM_OS" '
+        BEGIN {printf "{\"os\":\"%s\",\"packages\":[",osname; sep=""; bad=0}
+        {if ($0 !~ /^[a-z0-9][a-z0-9+._:-]*$/ || length($0)>128) {bad=1; exit 1} printf "%s\"%s\"",sep,$0; sep=","}
+        END {if (bad) exit 1; print "]}"}'
+)
+platform_dependencies_snapshot() {
+    _platform_real && platform_detect || return 1
+    (($# <= 1)) || return 2
+    local file=${1:-}
+    if [[ -z $file ]]; then _platform_dependency_begin; return $?; fi
+    [[ $file == /* && ! -e $file && ! -L $file ]] && _platform_no_symlink "$file" || return 1
+    (umask 077; set -o noclobber; _platform_package_inventory > "$file") || return 1
+}
+_platform_dependency_begin() {
+    local file=${XM_DEPENDENCY_SNAPSHOT_FILE:-}
+    [[ -z ${_XM_DEPENDENCY_BEFORE:-} ]] || return 0
+    if [[ -n $file ]]; then
+        _platform_no_symlink "$file" && [[ -f $file && $(wc -c < "$file") -le 1048576 ]] || { _platform_error '依赖快照路径或大小无效。'; return 1; }
+        _XM_DEPENDENCY_BEFORE=$(cat "$file") || return 1
+    else _XM_DEPENDENCY_BEFORE=$(_platform_package_inventory) || return 1; fi
+
+}
+_platform_dependency_record() {
+    [[ -n ${_XM_DEPENDENCY_BEFORE:-} ]] || return 0
+    _platform_paths || return 1
+    _platform_owned_dir "$XM_ETC" || return 0 # First install records after prepare.
+    local target=$XM_ETC/dependency-ledger.json tmp
+    _platform_no_symlink "$target" || return 1
+    [[ ! -e $target || ( -f $target && $(wc -c < "$target") -le 1048576 ) ]] || return 1
+    tmp=$(umask 077; mktemp -d "$XM_ETC/.dependency-ledger.XXXXXXXX") || return 1
+    printf '%s\n' "$_XM_DEPENDENCY_BEFORE" > "$tmp/before" || { rm -rf "$tmp"; return 1; }
+    _platform_package_inventory > "$tmp/after" || { rm -rf "$tmp"; return 1; }
+    python3 - "$tmp/before" "$tmp/after" "$target" "$tmp/new" <<'PY'
+import json,pathlib,re,sys
+before,after,target,out=map(pathlib.Path,sys.argv[1:])
+try:
+ b=json.loads(before.read_text());a=json.loads(after.read_text())
+ for inv in (b,a):
+  assert set(inv)=={'os','packages'} and inv['os']==a['os'] and isinstance(inv['packages'],list)
+  assert all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in inv['packages'])
+ added=set(a['packages'])-set(b['packages'])
+ if target.exists():
+  old=json.loads(target.read_text());assert old.get('owner')=='xray-manager:1' and old.get('os')==a['os']
+  assert isinstance(old.get('baseline'),list) and isinstance(old.get('added'),list)
+  assert all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in old['baseline']+old['added'])
+  # Never adopt a dependency that was present before this invocation but was
+  # not already attributed to our installer (legacy/externally added package).
+  baseline=set(old['baseline']) | (set(b['packages'])-set(old['added']))
+  added=(set(old['added']) | added)-baseline
+ else: baseline=set(b['packages'])
+ out.write_text(json.dumps({'owner':'xray-manager:1','os':a['os'],'baseline':sorted(baseline),'added':sorted(added)})+'\n')
+except Exception as e: print('依赖记录错误：'+str(e),file=sys.stderr);sys.exit(1)
+PY
+    local result=$?
+    if ((result == 0)); then chmod 0600 "$tmp/new" && chown root:root "$tmp/new" && mv -f -- "$tmp/new" "$target" || result=1; fi
+    if ((result == 0)); then _XM_DEPENDENCY_BEFORE=; unset XM_DEPENDENCY_SNAPSHOT_FILE; fi
+    rm -rf -- "$tmp"
+    return "$result"
+}
+# Emit only removable, newly-added packages; preserve packages with external
+# installed reverse dependencies. Simulation must not remove anything outside it.
+_platform_dependency_plan() {
+    local ledger=$1
+    _platform_no_symlink "$ledger" && [[ -f $ledger && $(wc -c < "$ledger") -le 1048576 ]] || return 1
+    python3 - "$ledger" "${XM_OS:-}" <<'PY'
+import json,pathlib,re,subprocess,sys
+try:
+ j=json.loads(pathlib.Path(sys.argv[1]).read_text());osname=sys.argv[2]
+ assert j.get('owner')=='xray-manager:1' and j.get('os')==osname
+ assert isinstance(j.get('baseline'),list) and isinstance(j.get('added'),list)
+ assert all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in j['baseline']+j['added'])
+ if osname=='debian':
+  inventory=subprocess.check_output(['dpkg-query','-W','-f=${binary:Package}\t${db:Status-Status}\n'],text=True)
+  installed={l.split('\t')[0] for l in inventory.splitlines() if l.endswith('\tinstalled')}
+ else:installed=set(subprocess.check_output(['apk','info'],text=True).splitlines())
+ protected={'openssh','openssh-server','openssh-client','openssh-sftp-server','alpine-base','busybox','apk-tools','apt','dpkg','libc6','musl','systemd','openrc','sudo'}
+ if osname=='debian':
+  essentials=subprocess.check_output(['dpkg-query','-W','-f=${binary:Package}\t${Essential}\n'],text=True)
+  protected.update(l.split('\t')[0].split(':')[0] for l in essentials.splitlines() if l.endswith('\tyes'))
+ passwd=subprocess.check_output(['getent','passwd'],text=True)
+ if any(l.rsplit(':',1)[-1] in ('/bin/bash','/usr/bin/bash') for l in passwd.splitlines()):protected.add('bash')
+ candidates=(set(j['added'])-set(j['baseline'])) & installed
+ candidates={p for p in candidates if p.split(':')[0] not in protected}
+ # Iteratively protect dependencies required by packages outside our final set.
+ changed=True
+ while changed:
+  changed=False
+  for p in sorted(candidates):
+   if osname=='debian':
+    text=subprocess.check_output(['apt-cache','rdepends','--installed',p],text=True)
+    deps=set()
+    for line in text.splitlines():
+     if not line.startswith(' '):continue
+     token=line.strip().lstrip('|').strip().split()[0]
+     matches={x for x in installed if x==token or x.split(':')[0]==token}
+     if not matches:deps.add('?')
+     else:deps.update(matches)
+   else:
+    text=subprocess.check_output(['apk','info','--rdepends',p],text=True)
+    deps=set()
+    for line in text.splitlines():
+     if not line or 'is required by:' in line:continue
+     matches={x for x in installed if line==x or line.startswith(x+'-')}
+     if not matches:deps.add('?')
+     else:deps.update(matches)
+   if deps-candidates:
+    candidates.remove(p);changed=True
+ retained=(set(j['added']) & installed)-candidates
+ if retained:print('[警告] 保留系统/共享/登录Shell依赖：'+', '.join(sorted(retained)),file=sys.stderr)
+ if not candidates:sys.exit(0)
+ names=sorted(candidates)
+ argv=['apt-get','--simulate','--no-auto-remove','purge','--']+names if osname=='debian' else ['apk','del','--simulate','--']+names
+ text=subprocess.check_output(argv,stderr=subprocess.STDOUT,text=True)
+ removed=set()
+ for line in text.splitlines():
+  assert not re.match(r'^(?:Inst|Conf)\s',line) and not re.search(r'(?:Installing|Upgrading|Downgrading)\s',line),'simulation would alter unrelated package state'
+  match=re.match(r'^(?:Remv|Purg)\s+(\S+)',line) if osname=='debian' else re.search(r'(?:Purging|Removing)\s+(\S+)',line)
+  if match:
+   token=match[1]; matches={p for p in installed if p==token or p.split(':')[0]==token}
+   assert len(matches)==1,'ambiguous removal';removed.update(matches)
+ assert removed and removed<=candidates,'package simulation would exceed owned additions'
+ for p in sorted(removed):print(p)
+except Exception as e:print('依赖卸载计划无法安全确认：'+str(e),file=sys.stderr);sys.exit(1)
+PY
+}
+platform_dependency_cleanup() {
+    _platform_real && platform_detect || return 1
+    local ledger=${1:-${XM_ETC:-/etc/xray-manager}/dependency-ledger.json} plan package
+    [[ -e $ledger || -L $ledger ]] || { _platform_warning '未发现本项目依赖记录，保留历史软件包。'; return 0; }
+    plan=$(_platform_dependency_plan "$ledger") || return 1
+    [[ -n $plan ]] || { _platform_info '未发现可安全删除的独占新增依赖；共享/系统/历史包保留。'; return 0; }
+    local -a packages=()
+    while IFS= read -r package; do packages+=("$package"); done <<< "$plan"
+    # Re-run simulation immediately before mutation; never use auto-remove.
+    [[ $(_platform_dependency_plan "$ledger") == "$plan" ]] || return 1
+    if [[ $XM_OS == debian ]]; then DEBIAN_FRONTEND=noninteractive apt-get --no-auto-remove purge -y -- "${packages[@]}";
+    else apk del -- "${packages[@]}"; fi
+}
+
+_platform_clean_files_preflight() {
+    _platform_paths || return 1
+    local dir
+    for dir in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do
+        _platform_no_symlink "$dir" && _platform_owned_dir "$dir" || { _platform_error "完全卸载拒绝未受管目录：$dir"; return 1; }
+    done
+    python3 - "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" <<'PY'
+import pathlib,re,sys
+home,etc,data,logs=map(pathlib.Path,sys.argv[1:])
+allowed={home:{'.xray-manager-owned','xray-manager.sh','install.sh','bin','lib','assets'},home/'bin':{'xray','xray.previous','sing-box'},home/'lib':{'common.sh','state.sh','platform.sh','protocol.sh'},home/'assets':{'xy','xray-manager.service','xray-manager.openrc','xray-manager.logrotate','xray-manager-restart.service','xray-manager-restart.timer','xray-manager-restart.openrc','xray-manager-restart.py','xray-manager-extra.service','xray-manager-extra.openrc'},etc:{'.xray-manager-owned','.manager.lock','state.json','config.json','extra.json','extra-core.sha256','core.previous-version','restart-schedule','dependency-ledger.json','last-error.log','last-extra-error.log'},data:{'.xray-manager-owned','.xray-manager-account'},logs:{'.xray-manager-owned','console.log','extra-console.log','restart-schedule.log'}}
+try:
+ for base in (home,etc,data,logs):
+  for p in base.rglob('*'):
+   if p.is_symlink():raise ValueError('symlink '+str(p))
+   names=allowed.get(p.parent,set())
+   extra=p.parent==etc and re.fullmatch(r'trojan-retired-backup\.[A-Za-z0-9]{8}',p.name)
+   rotated=p.parent==logs and re.fullmatch(r'(console|extra-console|restart-schedule)\.log\.[1-4](?:\.gz)?',p.name)
+   if p.name not in names and not extra and not rotated:raise ValueError('unknown file retained: '+str(p))
+   if p.is_dir() and p not in allowed:raise ValueError('unexpected directory '+str(p))
+   if not(p.is_dir() or p.is_file()):raise ValueError('non-regular file '+str(p))
+except Exception as e:print('完全卸载预检失败：'+str(e),file=sys.stderr);sys.exit(1)
+PY
+}
+_platform_clean_account_preflight() {
+    [[ -z ${XM_ROOT:-} ]] || return 0
+    local account group uid gid entry name other_uid other_gid home shell
+    account=$(getent passwd xray-manager || true)
+    group=$(getent group xray-manager || true)
+    [[ -n $account ]] || { [[ -z $group ]] || { _platform_error '同名组缺少受管账户。'; return 1; }; return 0; }
+    [[ -f $XM_DATA/.xray-manager-account && $(cat "$XM_DATA/.xray-manager-account") == 'xray-manager:1' ]] || return 1
+    IFS=: read -r name _ uid gid _ home shell <<< "$account"
+    [[ $uid != 0 && $home == /var/lib/xray-manager && ( $shell == /sbin/nologin || $shell == /usr/sbin/nologin ) ]] || return 1
+    [[ $group =~ ^xray-manager:[^:]*:$gid:(xray-manager)?$ ]] || { _platform_error '专用组被外部用户共享，拒绝删除账户。'; return 1; }
+    while IFS=: read -r name _ other_uid other_gid _; do
+        [[ $name == xray-manager || ( $other_uid != "$uid" && $other_gid != "$gid" ) ]] || { _platform_error '专用 UID/GID 被外部账户共享。'; return 1; }
+    done < <(getent passwd)
+    python3 - "$uid" "$XM_BIN" "$XM_HOME/bin/sing-box" <<'PY'
+import glob,os,sys
+uid=int(sys.argv[1]);allowed=set(sys.argv[2:])
+for p in glob.glob('/proc/[0-9]*'):
+ try:
+  if os.stat(p).st_uid==uid and os.readlink(p+'/exe') not in allowed:raise ValueError('foreign process uses project account')
+ except (FileNotFoundError,ProcessLookupError,PermissionError):pass
+PY
+}
+platform_clean_uninstall_preflight() {
+    _platform_clean_files_preflight && _platform_clean_account_preflight && platform_shortcut_preflight || return 1
+    if [[ -z ${XM_ROOT:-} ]]; then
+        platform_restart_schedule_preflight && platform_extra_preflight && _platform_main_resource_preflight || return 1
+        local service
+        [[ $XM_INIT != systemd ]] && service=/etc/init.d/xray-manager || service=/etc/systemd/system/xray-manager.service
+        _platform_check_service_file "$service" && _platform_check_service_file /etc/logrotate.d/xray-manager || return 1
+    fi
+    if [[ -e $XM_ETC/dependency-ledger.json ]]; then
+        _platform_dependency_plan "$XM_ETC/dependency-ledger.json" >/dev/null || { _platform_error '依赖移除计划无法安全确认，完全卸载尚未改变系统。'; return 1; }
+    fi
+}
+platform_clean_uninstall() (
+    platform_clean_uninstall_preflight || return 1
+    local tmp='' ledger='' result=0 uid
+    trap '[[ -z $tmp ]] || rm -rf -- "$tmp"' EXIT
+    if [[ -e $XM_ETC/dependency-ledger.json ]]; then
+        tmp=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/xray-manager-uninstall.XXXXXXXX") || return 1
+        ledger=$tmp/ledger.json
+        cp -- "$XM_ETC/dependency-ledger.json" "$ledger" || { rm -rf "$tmp"; return 1; }
+    fi
+    if [[ -z ${XM_ROOT:-} ]]; then
+        platform_extra_remove_service && platform_remove_service && platform_shortcut_remove || { [[ -z $tmp ]] || rm -rf "$tmp"; return 1; }
+        _platform_clean_account_preflight || return 1
+        if [[ $XM_INIT == openrc ]]; then
+            local pidfile
+            for pidfile in /run/xray-manager.pid /run/xray-manager-extra.pid /run/xray-manager-restart.pid; do
+                _platform_no_symlink "$pidfile" || return 1
+                [[ ! -e $pidfile || -f $pidfile ]] || return 1
+                rm -f -- "$pidfile" || return 1
+            done
+        fi
+        uid=$(getent passwd xray-manager | cut -d: -f3 || true)
+        if [[ -n $uid ]]; then
+            python3 - "$uid" <<'PYQUIET'
+import glob,os,sys
+uid=int(sys.argv[1])
+for p in glob.glob('/proc/[0-9]*'):
+ try:
+  if os.stat(p).st_uid==uid:raise ValueError('project account still has a running process; cleanup stopped')
+ except (FileNotFoundError,ProcessLookupError,PermissionError):pass
+PYQUIET
+            [[ $? == 0 ]] || return 1
+            if [[ $XM_OS == alpine ]]; then deluser xray-manager || return 1; else userdel xray-manager || return 1; fi
+            if getent group xray-manager >/dev/null; then
+                if [[ $XM_OS == alpine ]]; then delgroup xray-manager || return 1; else groupdel xray-manager || return 1; fi
+            fi
+        fi
+    else platform_shortcut_remove || return 1; fi
+    # Revalidate all leaves immediately before deleting. Unknown files always stop
+    # cleanup; no recursive rm of an unchecked directory is used.
+    _platform_clean_files_preflight || return 1
+    python3 - "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" <<'PY'
+import pathlib,sys
+for path in map(pathlib.Path,sys.argv[1:]):
+ for p in sorted(path.rglob('*'),key=lambda p:len(p.parts),reverse=True):
+  if p.is_symlink():raise ValueError('path changed to symlink during cleanup')
+  if p.is_dir():p.rmdir()
+  elif p.is_file():p.unlink()
+  else:raise ValueError('path changed type during cleanup')
+ path.rmdir()
+PY
+    [[ $? == 0 ]] || result=1
+    if ((result == 0)) && [[ -z ${XM_ROOT:-} && -n $ledger ]]; then platform_dependency_cleanup "$ledger" || result=1; fi
+    [[ -z $tmp ]] || rm -rf -- "$tmp"
+    return "$result"
+)
+
+_platform_extra_verify_archive() {
+    python3 - "$@" <<'PY'
+import hashlib,pathlib,struct,sys,tarfile
+archive,digest,folder,arch,out,hfile=sys.argv[1:]
+try:
+    h=hashlib.sha256()
+    with open(archive,'rb') as f:
+        for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
+    if h.hexdigest()!=digest: raise ValueError('pinned SHA256 mismatch')
+    with tarfile.open(archive,'r:gz') as tar:
+        seen=set(); total=0; chosen=None
+        for member in tar:
+            p=pathlib.PurePosixPath(member.name)
+            if member.name in seen or p.is_absolute() or '..' in p.parts or '\\' in member.name or not(member.isfile() or member.isdir()): raise ValueError('unsafe archive member')
+            seen.add(member.name); total+=member.size
+            if member.size>150*1024*1024 or total>300*1024*1024: raise ValueError('oversized archive')
+            if member.name==folder+'/sing-box': chosen=member
+        if chosen is None: raise ValueError('missing binary')
+        src=tar.extractfile(chosen);head=src.read(64)
+        if len(head)<64 or head[:6]!=b'\x7fELF\x02\x01' or struct.unpack('<H',head[18:20])[0]!=(62 if arch=='amd64' else 183): raise ValueError('wrong ELF architecture')
+        h=hashlib.sha256();h.update(head)
+        with open(out,'xb') as f:
+            f.write(head)
+            for chunk in iter(lambda:src.read(1024*1024),b''):f.write(chunk);h.update(chunk)
+        pathlib.Path(hfile).write_text(h.hexdigest()+'\n')
+except Exception as e:
+    print('辅助核心校验失败：'+str(e),file=sys.stderr);sys.exit(1)
+PY
+}
+_platform_main_resource_preflight() {
+    local target link dir file
+    if [[ $XM_INIT == systemd ]]; then
+        target=/etc/systemd/system/xray-manager.service
+        for dir in /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system /run/systemd/system; do
+            file=$dir/xray-manager.service.d
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "拒绝外部主服务覆盖：$file"; return 1; }
+            [[ $dir == /etc/systemd/system || ( ! -e $dir/xray-manager.service && ! -L $dir/xray-manager.service ) ]] || return 1
+        done
+        link=/etc/systemd/system/multi-user.target.wants/xray-manager.service
+    else
+        target=/etc/init.d/xray-manager
+        for dir in /etc /usr/local/etc /lib/rc /usr/lib/rc; do
+            for file in "$dir/conf.d/xray-manager" "$dir/conf.d/xray-manager."*; do [[ ! -e $file && ! -L $file ]] || { _platform_error "拒绝外部主服务覆盖：$file"; return 1; }; done
+            [[ $dir == /etc || ( ! -e $dir/init.d/xray-manager && ! -L $dir/init.d/xray-manager ) ]] || return 1
+        done
+        for file in /etc/runlevels/*/xray-manager; do [[ ! -e $file && ! -L $file || $file == /etc/runlevels/default/xray-manager ]] || return 1; done
+        file=/run/xray-manager.pid
+        _platform_no_symlink "$file" || return 1
+        if [[ -e $file ]]; then [[ -f $file ]] && _platform_owned_file "$target" || return 1; fi
+        link=/etc/runlevels/default/xray-manager
+    fi
+    _platform_check_service_file "$target" && _platform_no_symlink "${link%/*}" || return 1
+    [[ ! -e $link && ! -L $link || ( -L $link && $(readlink "$link") == "$target" ) ]] || { _platform_error '主服务存在外部开机链接。'; return 1; }
+}
+# Presence snapshot counts foreign resources too, so rollback never adopts them.
+platform_extra_installed() {
+    case ${XM_INIT:-} in systemd|openrc) ;; *) return 1 ;; esac
+    local target
+    target=$(_platform_extra_service_path)
+    [[ -e $target || -L $target ]]
+}
+platform_extra_discard_new() {
+    (($# == 2)) && [[ $1 =~ ^[01]$ && $2 =~ ^[01]$ ]] || return 2
+    _platform_extra_paths && _platform_real || return 1
+    local result=0 target
+    target=$(_platform_extra_service_path)
+    if [[ $2 == 0 && ( -e $target || -L $target ) ]]; then
+        _platform_owned_file "$target" && platform_extra_remove_service || result=1
+    fi
+    if [[ $1 == 0 && ( -e $XM_EXTRA_BIN || -L $XM_EXTRA_BIN ) ]]; then
+        _platform_no_symlink "$XM_EXTRA_BIN" && _platform_no_symlink "$XM_ETC/extra-core.sha256" || return 1
+        [[ -f $XM_EXTRA_BIN && -f $XM_ETC/extra-core.sha256 ]] || return 1
+        python3 - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
+import hashlib,pathlib,re,sys
+b,p=map(pathlib.Path,sys.argv[1:]);assert p.stat().st_size<=128
+h=p.read_text().strip();actual=hashlib.sha256()
+with b.open('rb') as f:
+ for data in iter(lambda:f.read(1024*1024),b''):actual.update(data)
+assert re.fullmatch('[0-9a-f]{64}',h) and actual.hexdigest()==h
+PY
+        [[ $? == 0 ]] || return 1
+        rm -f -- "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" || result=1
+    fi
+    return "$result"
 }

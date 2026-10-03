@@ -10,12 +10,24 @@ XM_LOG="${XM_ROOT}/var/log/xray-manager"
 XM_BIN="$XM_HOME/bin/xray"
 XM_STATE="$XM_ETC/state.json"
 XM_CONFIG="$XM_ETC/config.json"
+XM_EXTRA_BIN="$XM_HOME/bin/sing-box"
+XM_EXTRA_CONFIG="$XM_ETC/extra.json"
 XM_TEMP_DIR=
 XM_LOCK_FD=
 XM_YES=0
 
-xm_error() { printf '%s错误：%s%s\n' "${XM_UI_YELLOW:-}" "$*" "${XM_UI_RESET:-}" >&2; }
-xm_info() { printf '%s\n' "$*" >&2; }
+xm_message() { printf '%s[%s]%s %s\n' "$1" "$2" "${XM_UI_RESET:-}" "$3" >&2; }
+xm_info() { xm_message "${XM_UI_CYAN:-}" 信息 "$*"; }
+xm_success() { xm_message "${XM_UI_GREEN:-}" 成功 "$*"; }
+xm_ok() { xm_message "${XM_UI_GREEN:-}" OK "$*"; }
+xm_warning() { xm_message "${XM_UI_YELLOW:-}" 警告 "$*"; }
+xm_error() { xm_message "${XM_UI_RED:-}" 错误 "$*"; }
+xm_pause() {
+    [[ -t 0 && -t 2 ]] || return 0
+    printf '\n%s[信息]%s 按任意键返回%s…' "$XM_UI_CYAN" "$XM_UI_RESET" "${1:-主菜单}" >&2
+    IFS= read -r -s -n 1 || true
+    printf '\n' >&2
+}
 xm_require_root() {
     if [[ -z $XM_ROOT && $EUID -ne 0 ]]; then xm_error '请使用 root 或 sudo 运行。'; return 1; fi
     if [[ -n $XM_ROOT && ( $XM_ROOT != /* || $XM_ROOT == / || $XM_ROOT == */ || $XM_ROOT == *'/../'* || $XM_ROOT == */.. || $XM_ROOT == *'/./'* ) ]]; then
@@ -38,11 +50,11 @@ xm_confirm() {
 # Terminal styling is enabled only for interactive stderr. Any NO_COLOR presence
 # disables styling, including NO_COLOR=""; TERM=dumb is always plain text.
 # UI_GREEN/YELLOW are consumed by the entrypoint status renderer.
-export XM_UI_CYAN='' XM_UI_GREEN='' XM_UI_YELLOW='' XM_UI_BOLD='' XM_UI_RESET=''
+export XM_UI_RED='' XM_UI_CYAN='' XM_UI_GREEN='' XM_UI_YELLOW='' XM_UI_BOLD='' XM_UI_RESET=''
 xm_ui_init() {
-    XM_UI_CYAN=; XM_UI_GREEN=; XM_UI_YELLOW=; XM_UI_BOLD=; XM_UI_RESET=
+    XM_UI_RED=; XM_UI_CYAN=; XM_UI_GREEN=; XM_UI_YELLOW=; XM_UI_BOLD=; XM_UI_RESET=
     if [[ -t 2 && ! ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
-        XM_UI_CYAN=$'\033[36m'; XM_UI_GREEN=$'\033[32m'; XM_UI_YELLOW=$'\033[33m'
+        XM_UI_RED=$'\033[91m'; XM_UI_CYAN=$'\033[96m'; XM_UI_GREEN=$'\033[92m'; XM_UI_YELLOW=$'\033[93m'
         XM_UI_BOLD=$'\033[1m'; XM_UI_RESET=$'\033[0m'
     fi
 }
@@ -102,7 +114,7 @@ xm_lock() {
     flock -n "$XM_LOCK_FD" || { xm_error '另一项管理操作正在执行，请稍后重试。'; exec {XM_LOCK_FD}>&-; XM_LOCK_FD=; return 1; }
 }
 xm_unlock() {
-    if [[ -n $XM_LOCK_FD ]]; then flock -u "$XM_LOCK_FD"; exec {XM_LOCK_FD}>&-; XM_LOCK_FD=; fi
+    if [[ -n $XM_LOCK_FD ]]; then exec {XM_LOCK_FD}>&-; XM_LOCK_FD=; fi
 }
 xm_private_temp() {
     [[ -z $XM_TEMP_DIR ]] || { xm_error '事务尚未清理。'; return 1; }
@@ -135,7 +147,7 @@ xm_atomic_copy() {
 }
 xm_owned() { [[ -f $1/.xray-manager-owned && ! -L $1 && ! -L $1/.xray-manager-owned ]] && [[ $(cat "$1/.xray-manager-owned") == xray-manager:1 ]]; }
 xm_installed() {
-    xm_path_no_links "$XM_BIN" && xm_path_no_links "$XM_STATE" && xm_path_no_links "$XM_CONFIG" && xm_path_no_links "$XM_DATA" && xm_path_no_links "$XM_LOG" && xm_owned "$XM_HOME" && xm_owned "$XM_ETC" && [[ -x $XM_BIN && -f $XM_STATE && ! -L $XM_STATE && ! -L $XM_BIN ]] || {
+    xm_path_no_links "$XM_BIN" && xm_path_no_links "$XM_STATE" && xm_path_no_links "$XM_CONFIG" && xm_path_no_links "$XM_EXTRA_CONFIG" && xm_path_no_links "$XM_EXTRA_BIN" && xm_path_no_links "$XM_DATA" && xm_path_no_links "$XM_LOG" && xm_owned "$XM_HOME" && xm_owned "$XM_ETC" && [[ -x $XM_BIN && -f $XM_STATE && ! -L $XM_STATE && ! -L $XM_BIN ]] || {
         xm_error '尚未安装，或受管文件不完整；请运行 install。'; return 1;
     }
 }
@@ -144,4 +156,9 @@ xm_installed() {
 # cannot retain the manager's lock. Function redirection is restored on return.
 xm_service_call() {
     if [[ -n $XM_LOCK_FD ]]; then platform_service "$@" {XM_LOCK_FD}>&-; else platform_service "$@"; fi
+}
+
+# Extra service subprocesses also cannot retain the manager lock.
+xm_extra_service_call() {
+    if [[ -n $XM_LOCK_FD ]]; then platform_extra_service "$@" {XM_LOCK_FD}>&-; else platform_extra_service "$@"; fi
 }

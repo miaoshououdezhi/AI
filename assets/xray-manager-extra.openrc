@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+# xray-manager-owned:1
+# shellcheck shell=sh disable=SC2034
+description="Xray Manager auxiliary sing-box"
+supervisor="supervise-daemon"
+command="/bin/setpriv"
+command_args="--reuid=xray-manager --regid=xray-manager --init-groups --bounding-set=-all,+net_bind_service --inh-caps=+net_bind_service --ambient-caps=+net_bind_service --no-new-privs /opt/xray-manager/bin/sing-box run -c /etc/xray-manager/extra.json"
+directory="/var/lib/xray-manager"
+pidfile="/run/xray-manager-extra.pid"
+output_log="/var/log/xray-manager/extra-console.log"
+error_log="/var/log/xray-manager/extra-console.log"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+umask=0027
+rc_ulimit="-n 32768"
+
+depend() {
+    need loopback
+    use net
+    after firewall
+}
+
+start_pre() {
+    [ ! -L "$pidfile" ] && { [ ! -e "$pidfile" ] || [ -f "$pidfile" ]; } || return 1
+    checkpath --directory --owner root:xray-manager --mode 0750 /var/log/xray-manager || return 1
+    checkpath --file --owner root:xray-manager --mode 0640 "$output_log" || return 1
+    /bin/setpriv --reuid=xray-manager --regid=xray-manager --init-groups /opt/xray-manager/bin/sing-box check -c /etc/xray-manager/extra.json >/dev/null 2>&1 || return 1
+}

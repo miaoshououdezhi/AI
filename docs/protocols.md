@@ -41,7 +41,7 @@ REALITY 的 `sni` 需与目标站点的证书相符，`target` 为 `host:port`�
 protocol_new vless-reality ID NAME PORT ADDRESS SNI TARGET [UUID PRIVATE PUBLIC SHORTID]
 protocol_new vless-xhttp ID NAME PORT ADDRESS SNI TARGET PATH MODE [UUID PRIVATE PUBLIC SHORTID]
 protocol_new shadowsocks ID NAME PORT ADDRESS [PASSWORD]
-protocol_validate_node NODE_JSON
+protocol_validate_node NODE_JSON [strict|maintenance]
 protocol_generate STATE_FILE OUTPUT_FILE
 protocol_share NODE_JSON
 ```
@@ -80,3 +80,47 @@ XRAY_BIN=/path/to/xray bash tests/test-xhttp.sh --e2e
 - [v26.3.27 XHTTP 模式运行选择](https://github.com/XTLS/Xray-core/blob/v26.3.27/transport/internet/splithttp/dialer.go)。
 - [v26.9.30 传输 schema](https://github.com/XTLS/Xray-core/blob/v26.9.30/infra/conf/transport_internet.go)。
 - [官方 VLESS URI 标准提案（XHTTP path/mode 与 REALITY 字段）](https://github.com/XTLS/Xray-core/discussions/716)。
+
+## 扩展五协议与双核心
+
+2026-10-03 核实固定辅助核心 **sing-box 1.14.2**。Xray 仍处理 REALITY、XHTTP、SS2022，并增加 `vless-ws`、`socks5`。AnyTLS、HY2 (`hysteria2`)、TUIC v5 (`tuicv5`) 使用辅助核心，独立服务由平台负责。它们不伪装成 Xray 入站。
+
+| 新类型 | 状态额外字段 | 传输/安全 |
+| --- | --- | --- |
+| `vless-ws` | uuid, path, sni, tls_cert, tls_key | VLESS + WS + TLS；TCP，无 Vision flow |
+| `socks5` | username, password | 始终密码认证；TCP/UDP；SOCKS 本身无传输加密 |
+| `anytls` | password, sni, tls_cert, tls_key | AnyTLS + TLS；TCP，默认 padding |
+| `hysteria2` | password, sni, tls_cert, tls_key | QUIC/UDP + TLS；不设置硬编码带宽或混淆 |
+| `tuicv5` | uuid, password, sni, tls_cert, tls_key | QUIC/UDP + TLS；cubic，ALPN h3，0-RTT 关闭 |
+
+```text
+protocol_new vless-ws ID NAME PORT ADDRESS SNI PATH CERT_FILE KEY_FILE [UUID]
+protocol_new socks5 ID NAME PORT ADDRESS [USERNAME PASSWORD]
+protocol_new anytls ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [PASSWORD]
+protocol_new hysteria2 ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [PASSWORD]
+protocol_new tuicv5 ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [UUID PASSWORD]
+protocol_tls_read CERT_FILE KEY_FILE SNI
+protocol_generate_extra STATE_FILE OUTPUT_FILE
+protocol_has_extra STATE_FILE
+protocol_engine TYPE
+```
+
+TLS PEM 内嵌状态与导出文件，可在新机器恢复，无需原证书路径。读取证书最大 256 KiB、私钥最大 16 KiB，绝对普通文件且拒符号链接，不可被组/其他用户写入；私钥禁止其他用户读取。校验证书生效时间、过期时间、SAN 与 SNI、公私钥配对。仅接受未加密 PEM 私钥。敏感 PEM 和认证资料通过 stdin 交给解析/加密程序，绝不放入子进程参数。自签证书需要用户客户端显式信任对应证书；分享不默认跳过 TLS 验证。TLS 分享不包含服务器 PEM 私钥。
+
+新节点 UUID/密码/用户名使用系统安全随机数。SOCKS 用户名 3–64 ASCII 字母数字、_、-，密码 16–128；其余新密码 16–256 无控制字符。WS 路径与 XHTTP 路径规则一致。端口、ID、名称、凭据冲突由上层事务与交互校验。`protocol_generate` 过滤辅助协议，`protocol_generate_extra` 过滤 Xray 协议，各自产生 0600 配置；辅助出口使用 direct，显式 reject 私网及保留网段，不修改全局 DNS。
+
+```bash
+XRAY_BIN=/path/to/xray XM_EXTRA_BIN=/path/to/sing-box bash tests/test-extra-protocol.sh
+XRAY_BIN=/path/to/xray XM_EXTRA_BIN=/path/to/sing-box bash tests/test-extra-e2e.sh
+```
+
+首项测试五种节点、非法参数、TLS 身份/权限、迁移 PEM、分享与双核心原生配置；第二项依次启动真实双方，TLS 保持验证并信任临时测试证书，SOCKS 也进行密码认证，请求自身精确 loopback 端口的 HTTP fixture。测试副本只放行该 IP/端口，产品仍阻断私网。未宣称第三方 GUI 全部导入互通。
+
+- [sing-box 1.14.2 官方发布](https://github.com/SagerNet/sing-box/releases/tag/v1.14.2)。
+- [固定版 TLS schema 与内嵌 PEM](https://github.com/SagerNet/sing-box/blob/v1.14.2/option/tls.go)。
+- [AnyTLS 入站](https://sing-box.sagernet.org/configuration/inbound/anytls/)、[HY2 入站](https://sing-box.sagernet.org/configuration/inbound/hysteria2/)、[TUIC 入站](https://sing-box.sagernet.org/configuration/inbound/tuic/)。
+- [HY2 官方 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/)。
+
+分享格式另外核实 [AnyTLS 官方 URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md)、[v2rayN TUIC URI 解析](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/TuicFmt.cs)、[v2rayN SOCKS URI 解析](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/SocksFmt.cs)。SOCKS 使用标准 `socks5://username:password@host:port` percent-encoded userinfo；客户端支持情况需各自确认。
+
+TLS 维护模式是显式参数 `protocol_validate_node NODE_JSON maintenance`，仅略过证书过期或尚未生效的时间检查，保留 schema、PEM、SAN 和公私钥配对检查。只用于读取既有状态以续期、删除或私密导出；新建、导入、候选配置及修改默认严格校验。不存在全局环境变量开关；任意其他模式会拒绝。
