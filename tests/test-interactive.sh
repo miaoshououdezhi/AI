@@ -40,7 +40,15 @@ platform_release_choices() {
     [[ $TEST_RELEASE_FAIL == 0 ]] || return 1
     printf 'stable\tv26.10.2\t2026-10-02T06:00:00Z\nstable\tv26.9.1\t2026-09-01T10:00:00Z\npreview\tv26.10.3\t2026-10-03T07:00:00Z\npreview\tv26.10.1\t2026-10-01T11:00:00Z\n'
 }
-xm_dispatch() { jq -n --args '$ARGS.positional' "$@" > "$TEST_CALL"; }
+# Encode arguments as data on stdin. A random legal Base64URL key can start
+# with '-' and must never be interpreted as a jq option or exposed in argv.
+xm_dispatch() { printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$TEST_CALL"; }
+for TEST_ENCODING_CASE in {1..64}; do
+    xm_dispatch add "-B${TEST_ENCODING_CASE}" '' '--help' '-n' || fail 'fixture argument encoding'
+    jq -e --arg expected "-B${TEST_ENCODING_CASE}" '.==["add",$expected,"","--help","-n"]' "$TEST_CALL" >/dev/null || fail 'fixture leading-dash/empty roundtrip'
+done
+pass '64 fixture argument roundtrips preserve leading dashes and empty values'
+
 
 printf '3\n\n\n\n\n\n' > "$TEST_ROOT/input"
 xm_menu_add < "$TEST_ROOT/input" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/default.log" || fail 'default SS creation'
