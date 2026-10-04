@@ -113,11 +113,38 @@ pass 'four releases/dates, explicit second confirmation, manual fallback, return
 xm_ui_init
 COLUMNS=80 xm_menu_render 2> "$TEST_ROOT/wide.log"
 COLUMNS=40 xm_menu_render 2> "$TEST_ROOT/narrow.log"
-[[ $(wc -l < "$TEST_ROOT/wide.log") -le 34 ]] || fail 'wide menu exceeds 34 lines'
+[[ $(wc -l < "$TEST_ROOT/wide.log") -le 40 ]] || fail 'wide menu exceeds 40 lines'
 grep -q '\[1\].*\[2\]' "$TEST_ROOT/wide.log" || fail 'wide menu not two columns'
 if grep -q '\[1\].*\[2\]' "$TEST_ROOT/narrow.log"; then fail 'narrow menu still two columns'; fi
 if LC_ALL=C grep -q $'\033' "$TEST_ROOT/wide.log"; then fail 'non-TTY contains ANSI'; fi
-pass 'wide menu fits 34 lines, narrow menu uses one column, non-TTY output is plain'
+pass 'wide menu fits 40 lines, narrow menu uses one column, non-TTY output is plain'
+
+[[ $(wc -l < "$TEST_ROOT/narrow.log") -le 40 ]] || fail 'narrow menu exceeds 40 lines'
+python3 - "$TEST_ROOT/wide.log" <<'PYCOLUMNS'
+import sys
+lines=open(sys.argv[1]).read().splitlines()
+positions=[]
+for right in (2,4,6,8,10,13):
+    matches=[line.index('[%s]'%right) for line in lines if '[%s]'%right in line]
+    assert len(matches)==1
+    positions.extend(matches)
+assert len(set(positions))==1,positions
+PYCOLUMNS
+[[ $? == 0 ]] || fail 'wide menu second column alignment'
+(
+    platform_system_info() { printf 'Host\t'; printf '长%.0s' {1..80}; printf '\033[31m\n'; }
+    COLUMNS=32 xm_menu_render 2> "$TEST_ROOT/truncated.log"
+    python3 - "$TEST_ROOT/truncated.log" <<'PYTRUNCATE'
+import sys,unicodedata
+line=next(s for s in open(sys.argv[1]).read().splitlines() if 'Host' in s)
+assert '\x1b' not in line
+width=sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W','F') else 1 for c in line)
+assert width<=32 and '…' in line,(width,line)
+PYTRUNCATE
+    [[ $? == 0 ]] || fail 'system info long/control display'
+) || fail 'system info truncate fixture'
+pass 'main menu height, aligned numbered columns and Unicode system info width are bounded'
+
 
 # Real PTYs verify the TTY gate, NO_COLOR presence, and TERM=dumb behavior.
 python3 - "$TEST_REPO" <<'PY'
@@ -262,3 +289,22 @@ TEST_RUNNING=1
 xm_dispatch scheduled-restart >/dev/null 2>&1 || fail 'running scheduled runner'
 [[ $TEST_RESTARTED == 1 ]] || fail 'scheduled runner did not restart active core'
 pass 'schedule strict time, y confirmation, decline, and stopped-core skip'
+
+# Test all main-menu routes without executing privileged mutations. The same
+# public menu loop consumes actual user choices, including path prompts.
+(
+    xm_require_root() { return 0; }
+    xm_menu_render() { return 0; }
+    xm_pause() { return 0; }
+    xm_menu_ready() { return 0; }
+    xm_dispatch() { printf '%s\n' "$1" >> "$TEST_ROOT/routes"; return 1; }
+    xm_menu_upgrade() { printf 'upgrade\n' >> "$TEST_ROOT/routes"; }
+    xm_menu_node() { printf 'node-%s\n' "$1" >> "$TEST_ROOT/routes"; }
+    xm_menu_add() { printf 'add\n' >> "$TEST_ROOT/routes"; }
+    xm_menu_service() { printf 'service\n' >> "$TEST_ROOT/routes"; }
+    printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n/tmp/export.json\n13\n/tmp/import.json\n14\n0\n' > "$TEST_ROOT/route-input"
+    xm_menu < "$TEST_ROOT/route-input" >/dev/null 2> "$TEST_ROOT/route-log" || fail 'main menu route loop'
+    printf 'install\nupgrade\nrollback\nupdate-manager\nnode-view\nadd\nnode-delete\nnode-share\nservice\nlogs\ndiagnose\nexport\nimport\nuninstall\n' > "$TEST_ROOT/expected-routes"
+    cmp "$TEST_ROOT/routes" "$TEST_ROOT/expected-routes" || fail 'main menu numbering mismatches handlers'
+) || fail 'main menu dispatch fixture'
+pass 'main menu numbers 1..14 route to every intended handler'

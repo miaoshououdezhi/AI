@@ -21,7 +21,7 @@ for mode in ('color','no_color','dumb'):
  master,slave=pty.openpty();env=dict(os.environ);env['TERM']='xterm-256color';env.pop('NO_COLOR',None)
  if mode=='no_color':env['NO_COLOR']=''
  if mode=='dumb':env['TERM']='dumb'
- cmd=r'source "$1/lib/common.sh"; source "$1/lib/platform.sh"; source "$1/lib/protocol.sh"; xm_ui_init; xm_info info; xm_success success; xm_ok ok; xm_warning warning; xm_error error; protocol_validate_node "{}"; printf "human(\"错误\", \"platform-color\")\n" | _platform_python; source <(sed -n "/^xray_boot_message()/,/^xray_boot_info()/p" "$1/install.sh"); xray_boot_error bootstrap-color; xm_pause; printf "RETURNED\\n" >&2'
+ cmd=r'source "$1/lib/common.sh"; source "$1/lib/platform.sh"; source "$1/lib/protocol.sh"; xm_ui_init; xm_info info; xm_success success; xm_ok ok; xm_warning warning; xm_error error; xm_ui_item 1 安装核心; xm_ui_pair 2 版本升级 3 核心回退; protocol_validate_node "{}"; printf "human(\"错误\", \"platform-color\")\n" | _platform_python; source <(sed -n "/^xray_boot_message()/,/^xray_boot_info()/p" "$1/install.sh"); xray_boot_error bootstrap-color; xm_pause; printf "RETURNED\\n" >&2'
  p=subprocess.Popen(['bash','-c',cmd,'--',repo],stdin=slave,stderr=slave,stdout=subprocess.DEVNULL,env=env)
  os.close(slave);data=b''; deadline=time.monotonic()+5;sent=False
  while time.monotonic()<deadline:
@@ -42,8 +42,9 @@ for mode in ('color','no_color','dumb'):
   assert '\x1b[38;2;255;0;0m[错误] bootstrap-color\x1b[0m'.encode() in data,data
   assert '\x1b[38;2;255;0;0m[错误] platform-color\x1b[0m'.encode() in data,data
   assert '\x1b[38;2;255;0;0m[错误] 协议：'.encode() in data,data
+  assert '\x1b[38;2;0;191;255m[1]  \x1b[38;2;255;255;255m安装核心\x1b[0m'.encode() in data,data
   import re
-  assert set(re.findall(rb'\x1b\[([^m]+)m',data)) <= {b'38;2;0;191;255',b'38;2;0;255;255',b'38;2;0;255;0',b'38;2;255;0;0',b'0'},data
+  assert set(re.findall(rb'\x1b\[([^m]+)m',data)) <= {b'38;2;0;191;255',b'38;2;0;255;255',b'38;2;0;255;0',b'38;2;255;0;0',b'38;2;255;255;255',b'0'},data
  else:assert b'\x1b[' not in data,(mode,data)
 print('PASS real PTY bright labels, NO_COLOR/dumb and single-key return')
 PY

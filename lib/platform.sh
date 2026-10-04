@@ -1314,3 +1314,95 @@ PY
     fi
     return "$result"
 }
+
+# Read-only overview. XM_ROOT redirects file reads for deterministic fixtures;
+# no package, network, init, or persistent file operations are performed.
+platform_system_info() {
+    "${XM_PYTHON:-python3}" - "$XM_ROOT" <<'PYINFO'
+import math, os, re, unicodedata, sys
+root=sys.argv[1]
+def read(path):
+    try:
+        with open(root+path,encoding='utf-8',errors='replace') as f:return f.read(65536)
+    except (OSError,ValueError):return ''
+def clean(value):
+    value=' '.join(''.join(c for c in str(value) if unicodedata.category(c)[0]!='C').split())
+    return value[:160] or '未知'
+def number(value):
+    try:
+        n=int(value.strip());return n if n>0 else None
+    except ValueError:return None
+def human(n):
+    for unit in ('B','KiB','MiB','GiB','TiB'):
+        if n<1024 or unit=='TiB':return '%.1f %s'%(n,unit)
+        n/=1024
+fields={}
+for line in read('/etc/os-release').splitlines():
+    match=re.fullmatch(r'([A-Z_]+)=(.*)',line)
+    if match:
+        val=match[2]
+        if len(val)>1 and val[0]==val[-1] and val[0] in ('"',"'"):val=val[1:-1]
+        fields[match[1]]=val
+arch=read('/proc/sys/kernel/arch').strip() if root else os.uname().machine
+os_name=fields.get('PRETTY_NAME') or ' '.join(filter(None,(fields.get('NAME'),fields.get('VERSION_ID'))))
+host=read('/proc/sys/kernel/hostname').strip()
+kernel=read('/proc/sys/kernel/osrelease').strip()
+cpuinfo=read('/proc/cpuinfo')
+model=re.search(r'^(?:model name|Hardware|Processor)\s*:\s*(.+)$',cpuinfo,re.M)
+model=model[1] if model else ''
+cores=None
+if not root:
+    try:cores=len(os.sched_getaffinity(0))
+    except (AttributeError,OSError):cores=os.cpu_count()
+else:
+    match=re.search(r'^Cpus_allowed_list:\s*([0-9,-]+)$',read('/proc/self/status'),re.M)
+    if match:
+        try:
+            ids=set()
+            for item in match[1].split(','):
+                bounds=[int(x) for x in item.split('-')]
+                if len(bounds)==1:ids.add(bounds[0])
+                elif len(bounds)==2 and 0<=bounds[0]<=bounds[1]<=65535:ids.update(range(bounds[0],bounds[1]+1))
+                else:raise ValueError()
+            cores=len(ids) or None
+        except ValueError:pass
+    if cores is None:cores=len(re.findall(r'^processor\s*:',cpuinfo,re.M)) or None
+cg='/sys/fs/cgroup'
+for line in read('/proc/self/cgroup').splitlines():
+    if line.startswith('0::'):
+        path=line[3:].strip()
+        if path.startswith('/') and '..' not in path.split('/') and os.path.isdir(root+cg+path):cg+=path.rstrip('/')
+        break
+# Honor all readable ancestor limits, never displaying a child unlimited value
+# as host-sized memory when its parent imposes a tighter bound.
+paths=[]; path=cg
+while path.startswith('/sys/fs/cgroup'):
+    paths.append(path)
+    if path=='/sys/fs/cgroup':break
+    path=os.path.dirname(path)
+for path in paths:
+    quota=read(path+'/cpu.max').split()
+    if len(quota)==2:
+        q,p=number(quota[0]),number(quota[1])
+        if q and p:cores=min(cores or math.ceil(q/p),math.ceil(q/p))
+mem={}
+for key,value in re.findall(r'^(MemTotal|MemAvailable|MemFree|Buffers|Cached):\s*(\d+)\s+kB',read('/proc/meminfo'),re.M):mem[key]=int(value)*1024
+total=mem.get('MemTotal'); used=None
+if total:
+    available=mem.get('MemAvailable')
+    if available is None and 'MemFree' in mem:available=sum(mem.get(k,0) for k in ('MemFree','Buffers','Cached'))
+    if available is not None:used=max(0,total-min(total,available))
+for path in paths:
+    limit=number(read(path+'/memory.max')); current=read(path+'/memory.current').strip()
+    if limit and (total is None or limit<=total):
+        total=limit
+        try:used=max(0,min(total,int(current))) if int(current)>=0 else None
+        except ValueError:used=None
+memory=human(used)+' / '+human(total) if total and used is not None else '未知'
+try:
+    st=os.statvfs(root or '/'); disk=human((st.f_blocks-st.f_bfree)*st.f_frsize)+' / '+human(st.f_blocks*st.f_frsize)
+except OSError:disk='未知'
+values=(os_name+(' · '+arch if arch else '') if os_name else '未知',host,kernel,model+(' · %s 核'%cores if cores else '') if model or cores else '未知',memory,disk)
+for key,value in zip(('OS','Host','Kernel','CPU','Memory','Disk'),values):print(key+'\t'+clean(value))
+PYINFO
+}

@@ -50,10 +50,11 @@ xm_confirm() {
 # Terminal styling is enabled only for interactive stderr. Any NO_COLOR presence
 # disables styling, including NO_COLOR=""; TERM=dumb is always plain text.
 # UI_GREEN/YELLOW are consumed by the entrypoint status renderer.
-export XM_UI_BLUE='' XM_UI_RED='' XM_UI_CYAN='' XM_UI_GREEN='' XM_UI_YELLOW='' XM_UI_BOLD='' XM_UI_RESET=''
+export XM_UI_WHITE='' XM_UI_BLUE='' XM_UI_RED='' XM_UI_CYAN='' XM_UI_GREEN='' XM_UI_YELLOW='' XM_UI_BOLD='' XM_UI_RESET=''
 xm_ui_init() {
-    XM_UI_BLUE=; XM_UI_RED=; XM_UI_CYAN=; XM_UI_GREEN=; XM_UI_YELLOW=; XM_UI_BOLD=; XM_UI_RESET=
+    XM_UI_WHITE=; XM_UI_BLUE=; XM_UI_RED=; XM_UI_CYAN=; XM_UI_GREEN=; XM_UI_YELLOW=; XM_UI_BOLD=; XM_UI_RESET=
     if [[ -t 2 && ! ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
+        XM_UI_WHITE=$'\033[38;2;255;255;255m'
         XM_UI_BLUE=$'\033[38;2;0;191;255m'; XM_UI_CYAN=$'\033[38;2;0;255;255m'; XM_UI_GREEN=$'\033[38;2;0;255;0m'
         XM_UI_RED=$'\033[38;2;255;0;0m'; XM_UI_YELLOW=$XM_UI_BLUE
         XM_UI_BOLD=$XM_UI_BLUE; XM_UI_RESET=$'\033[0m'
@@ -69,11 +70,13 @@ xm_terminal_width() {
     fi
 }
 xm_ui_heading() { printf '\n%s%s%s\n\n' "$XM_UI_CYAN" "$1" "$XM_UI_RESET" >&2; }
-xm_ui_item() { printf '%s[%s]  %s%s%s\n' "$XM_UI_BLUE" "$1" "$XM_UI_CYAN" "$2" "$XM_UI_RESET" >&2; }
+xm_ui_item() { printf '%s[%s]  %s%s%s\n' "$XM_UI_BLUE" "$1" "$XM_UI_WHITE" "$2" "$XM_UI_RESET" >&2; }
 xm_ui_pair() {
     # Left labels are fixed four-character Chinese captions, followed by a
     # generous column gap. User strings are never accepted as menu captions.
-    printf '%s[%s]  %s%s          %s[%s]  %s%s%s\n' "$XM_UI_BLUE" "$1" "$XM_UI_CYAN" "$2" "$XM_UI_BLUE" "$3" "$XM_UI_CYAN" "$4" "$XM_UI_RESET" >&2
+    local number_gap=''
+    [[ ${#1} -gt 1 ]] || number_gap=' '
+    printf '%s[%s] %s %s%s          %s[%s]  %s%s%s\n' "$XM_UI_BLUE" "$1" "$number_gap" "$XM_UI_WHITE" "$2" "$XM_UI_BLUE" "$3" "$XM_UI_WHITE" "$4" "$XM_UI_RESET" >&2
 }
 xm_input_safe() {
     # read removes the newline; reject terminal control characters before using

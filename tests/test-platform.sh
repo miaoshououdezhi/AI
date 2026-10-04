@@ -220,3 +220,44 @@ printf '{"nodes":[]}\n' > "$TEST_HELPER_DIR/state.json"
 TEST_LISTENER=tcp
 expect_fail platform_random_port "$TEST_HELPER_DIR/state.json"
 printf 'PASS: platform matrix, isolation, archive integrity, sockets, release pagination/validation, public IP validation, bounded random selection\n'
+# Overview uses only private read fixtures and real Python parsing; untrusted
+# OS strings are data, never sourced, and container resource limits win.
+mkdir -p "$XM_ROOT/proc/sys/kernel" "$XM_ROOT/proc/self" "$XM_ROOT/sys/fs/cgroup/work"
+printf 'PRETTY_NAME="Fixture OS $(touch /should-not-run)"\n' > "$XM_ROOT/etc/os-release"
+printf 'host\033[31m\tunsafe\n' > "$XM_ROOT/proc/sys/kernel/hostname"
+printf '6.1-fixture\n' > "$XM_ROOT/proc/sys/kernel/osrelease"
+printf 'amd64\n' > "$XM_ROOT/proc/sys/kernel/arch"
+printf 'model name : Fixture CPU\nprocessor : 0\nprocessor : 1\n' > "$XM_ROOT/proc/cpuinfo"
+printf 'Cpus_allowed_list:\t0-7\n' > "$XM_ROOT/proc/self/status"
+printf '0::/work\n' > "$XM_ROOT/proc/self/cgroup"
+printf 'MemTotal: 1048576 kB\nMemAvailable: 786432 kB\n' > "$XM_ROOT/proc/meminfo"
+printf '268435456\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.max"
+printf '67108864\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.current"
+printf '150000 100000\n' > "$XM_ROOT/sys/fs/cgroup/work/cpu.max"
+platform_system_info > "$TEST_ROOT/overview"
+[[ $(wc -l < "$TEST_ROOT/overview") == 6 ]] || fail 'overview keys/rows'
+grep -q 'Memory.*64.0 MiB / 256.0 MiB' "$TEST_ROOT/overview" || fail 'cgroup memory limit/current ignored'
+grep -q 'CPU.*2 核' "$TEST_ROOT/overview" || fail 'effective CPU quota ignored'
+grep -Fq '$(touch /should-not-run)' "$TEST_ROOT/overview" || fail 'OS literal not preserved as data'
+if LC_ALL=C grep -q $'\033' "$TEST_ROOT/overview"; then fail 'overview control character survived'; fi
+printf '134217728\n' > "$XM_ROOT/sys/fs/cgroup/memory.max"
+printf '33554432\n' > "$XM_ROOT/sys/fs/cgroup/memory.current"
+platform_system_info > "$TEST_ROOT/overview"
+grep -q 'Memory.*32.0 MiB / 128.0 MiB' "$TEST_ROOT/overview" || fail 'ancestor cgroup limit ignored'
+printf 'max\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.max"
+printf 'max\n' > "$XM_ROOT/sys/fs/cgroup/memory.max"
+platform_system_info > "$TEST_ROOT/overview"
+grep -q 'Memory.*256.0 MiB / 1.0 GiB' "$TEST_ROOT/overview" || fail 'unlimited cgroup host fallback incorrect'
+printf '268435456\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.max"
+printf '999999999999\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.current"
+platform_system_info > "$TEST_ROOT/overview"
+grep -q 'Memory.*256.0 MiB / 256.0 MiB' "$TEST_ROOT/overview" || fail 'memory current not clamped'
+printf 'max\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.max"
+printf 'MemTotal: 1048576 kB\n' > "$XM_ROOT/proc/meminfo"
+platform_system_info > "$TEST_ROOT/overview"
+grep -q $'Memory\t未知' "$TEST_ROOT/overview" || fail 'missing used-memory data invented a value'
+rm -rf -- "$XM_ROOT/proc" "$XM_ROOT/sys"
+rm -f -- "$XM_ROOT/etc/os-release"
+platform_system_info > "$TEST_ROOT/overview"
+grep -q $'OS\t未知' "$TEST_ROOT/overview" && grep -q $'Memory\t未知' "$TEST_ROOT/overview" || fail 'missing overview data not unknown'
+printf 'PASS: read-only six-field overview sanitizes untrusted OS/host and honors CPU/cgroup memory bounds\n'

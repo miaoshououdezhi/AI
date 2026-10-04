@@ -942,6 +942,28 @@ xm_menu_service() {
     done
     xm_dispatch service "$action"
 }
+xm_menu_system_info() {
+    local width=$1 key value
+    while IFS=$'\t' read -r key value; do
+        case $key in OS|Host|Kernel|CPU|Memory|Disk) ;; *) continue ;; esac
+        value=$("${XM_PYTHON:-python3}" - "$value" "$width" <<'PYWIDTH'
+import sys,unicodedata
+budget=max(1,int(sys.argv[2])-10); text=sys.argv[1];out='';width=0
+for c in text:
+    if unicodedata.category(c)[0]=='C':continue
+    size=0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W','F') else 1
+    if width+size>budget:
+        while out and width>budget-1:
+            last=out[-1];out=out[:-1]
+            width-=0 if unicodedata.combining(last) else 2 if unicodedata.east_asian_width(last) in ('W','F') else 1
+        out+='…';break
+    out+=c;width+=size
+print(out or '未知')
+PYWIDTH
+) || value='未知'
+        printf '  %s%-6s%s %s%s\n' "$XM_UI_BLUE" "$key" "$XM_UI_GREEN" "$value" "$XM_UI_RESET" >&2
+    done < <(platform_system_info 2>/dev/null)
+}
 xm_menu_render() {
     local version='未安装' count=0 status='未运行' width status_color=$XM_UI_YELLOW
     width=$(xm_terminal_width)
@@ -954,36 +976,27 @@ xm_menu_render() {
     fi
     printf '\n' >&2
     if [[ $width =~ ^[0-9]+$ && $width -lt 60 ]]; then printf '%sXray 管理%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; else printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  Xray 管理  ·  xray-manager\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; fi
+    xm_menu_system_info "$width"
     printf '\n  %s核心 %s%s\n  %s节点 %s%s  ·  %s%s%s\n' "$XM_UI_CYAN" "$XM_UI_GREEN" "$version" "$XM_UI_CYAN" "$XM_UI_GREEN" "$count" "$status_color" "$status" "$XM_UI_RESET" >&2
-    if [[ $width =~ ^[0-9]+$ && $width -ge 60 ]]; then
-        printf '\n' >&2
-        printf '%s核心管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-        xm_ui_pair 1 '安装核心' 2 '选择版本并升级'; xm_ui_item 3 '核心回退'
-        xm_ui_item 14 '更新管理脚本'
-        printf '\n%s节点管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-        xm_ui_item 4 '节点管理（查看/修改）'
-        xm_ui_pair 5 '添加节点' 6 '删除节点'; xm_ui_item 7 '分享链接'
-        printf '\n%s运行维护%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-        xm_ui_pair 8 '服务操作' 9 '查看日志'; xm_ui_item 10 '运行诊断'
-        printf '\n%s数据管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-        xm_ui_pair 11 '导出配置' 12 '导入配置'
-        printf '\n%s危险操作%s\n' "$XM_UI_BLUE" "$XM_UI_RESET" >&2
-        xm_ui_item 13 '完全卸载'
-    else
-        xm_ui_heading '核心管理'
-        xm_ui_item 1 '安装核心'; xm_ui_item 2 '选择版本并升级'; xm_ui_item 3 '核心回退'
-        xm_ui_item 14 '更新管理脚本'
-        xm_ui_heading '节点管理'
-        xm_ui_item 4 '节点管理（查看/修改）'; xm_ui_item 5 '添加节点'; xm_ui_item 6 '删除节点'; xm_ui_item 7 '分享链接'
-        xm_ui_heading '运行维护'
-        xm_ui_item 8 '服务操作'; xm_ui_item 9 '查看日志'; xm_ui_item 10 '运行诊断'
-        xm_ui_heading '数据管理'
-        xm_ui_item 11 '导出配置'; xm_ui_item 12 '导入配置'
-        xm_ui_heading '危险操作'; xm_ui_item 13 '完全卸载'
-    fi
-    printf '\n' >&2; xm_ui_item 0 '退出'
+    local wide=0
+    [[ $width -lt 60 ]] || wide=1
+    printf '\n%s核心管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+    if [[ $wide == 1 ]]; then xm_ui_pair 1 '安装核心' 2 '版本升级'; xm_ui_pair 3 '核心回退' 4 '脚本更新'
+    else xm_ui_item 1 '安装核心'; xm_ui_item 2 '版本升级'; xm_ui_item 3 '核心回退'; xm_ui_item 4 '脚本更新'; fi
+    printf '\n%s节点管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+    if [[ $wide == 1 ]]; then xm_ui_pair 5 '节点管理' 6 '添加节点'; xm_ui_pair 7 '删除节点' 8 '分享链接'
+    else xm_ui_item 5 '节点管理'; xm_ui_item 6 '添加节点'; xm_ui_item 7 '删除节点'; xm_ui_item 8 '分享链接'; fi
+    printf '\n%s运行维护%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+    if [[ $wide == 1 ]]; then xm_ui_pair 9 '服务操作' 10 '查看日志'; else xm_ui_item 9 '服务操作'; xm_ui_item 10 '查看日志'; fi
+    xm_ui_item 11 '运行诊断'
+    printf '\n%s数据管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+    if [[ $wide == 1 ]]; then xm_ui_pair 12 '导出配置' 13 '导入配置'; else xm_ui_item 12 '导出配置'; xm_ui_item 13 '导入配置'; fi
+    printf '\n%s危险操作%s\n' "$XM_UI_BLUE" "$XM_UI_RESET" >&2
+    xm_ui_item 14 '完全卸载'
+    printf '\n' >&2; xm_ui_item 0 '退出脚本'
     printf '\n' >&2
 }
+
 xm_menu() {
     local XM_CHOICE XM_FILE
     xm_require_root || return 1
@@ -996,17 +1009,17 @@ xm_menu() {
             1) xm_dispatch install ;;
             2) xm_menu_upgrade ;;
             3) xm_dispatch rollback ;;
-            4) xm_menu_node view ;;
-            5) xm_menu_add ;;
-            6) xm_menu_node delete ;;
-            7) xm_menu_node share ;;
-            8) xm_menu_service ;;
-            9) xm_dispatch logs ;;
-            10) xm_dispatch diagnose ;;
-            11) xm_menu_ready && xm_read XM_FILE '导出配置绝对路径' "/root/xray-manager-export-$(date +%Y%m%d-%H%M%S).json" && xm_dispatch export "$XM_FILE" ;;
-            12) xm_menu_ready && xm_read XM_FILE '导入配置绝对路径' '' '选择已有导出文件；:q 取消' && xm_dispatch import "$XM_FILE" ;;
-            14) xm_dispatch update-manager && return 0 ;;
-            13) xm_dispatch uninstall && { xm_pause; return 0; } ;;
+            4) xm_dispatch update-manager && return 0 ;;
+            5) xm_menu_node view ;;
+            6) xm_menu_add ;;
+            7) xm_menu_node delete ;;
+            8) xm_menu_node share ;;
+            9) xm_menu_service ;;
+            10) xm_dispatch logs ;;
+            11) xm_dispatch diagnose ;;
+            12) xm_menu_ready && xm_read XM_FILE '导出配置绝对路径' "/root/xray-manager-export-$(date +%Y%m%d-%H%M%S).json" && xm_dispatch export "$XM_FILE" ;;
+            13) xm_menu_ready && xm_read XM_FILE '导入配置绝对路径' '' '选择已有导出文件；:q 取消' && xm_dispatch import "$XM_FILE" ;;
+            14) xm_dispatch uninstall && { xm_pause; return 0; } ;;
             *) xm_error '选择无效，请输入菜单编号。' ;;
         esac
         xm_pause
