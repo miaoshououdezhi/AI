@@ -128,7 +128,7 @@ for command in commands:
    err=b''.join(chunks)
   os.close(slave);os.close(master)
   assert b'[\xe9\x94\x99\xe8\xaf\xaf]' in err,(command,setting,err)
-  assert (b'\x1b[91m' in err)==(setting=='color'),(setting,err)
+  assert (b'\x1b[38;2;255;0;0m' in err)==(setting=='color'),(setting,err)
   assert b'PRIVATE KEY' not in err
 print('PASS Common-selected TTY red validation/TLS errors; NO_COLOR/dumb/piped stderr plain, stdout empty')
 PYTEST

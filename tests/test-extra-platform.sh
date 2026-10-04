@@ -96,6 +96,6 @@ for no_color,term,want_color in ((False,'xterm',True),(True,'xterm',False),(Fals
  output,_=child.communicate();os.close(slave);thread.join();os.close(master)
  out=b''.join(chunks)
  assert child.returncode==0 and json.loads(output)=={'machine':True} and b'\x1b' not in output
- assert (b'\x1b[96m' in out and b'\x1b[93m' in out and b'\x1b[91m' in out)==want_color, (term,no_color,out)
+ assert (b'\x1b[38;2;0;255;255m' in out and b'\x1b[38;2;0;191;255m' in out and b'\x1b[38;2;255;0;0m' in out)==want_color, (term,no_color,out)
 print('PASS: human Python stderr labels/TTY palette, NO_COLOR/TERM=dumb and clean machine stdout')
 PY
