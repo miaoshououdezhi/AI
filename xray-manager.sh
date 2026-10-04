@@ -43,6 +43,9 @@ xray-manager — Xray 中文交互管理
   add shadowsocks ID 名称 端口 地址 [密码]
   edit ID FIELD VALUE             修改匹配协议字段；keys PRIVATE PUBLIC
   edit ID tls CERT KEY [SNI]       同时替换 TLS 证书和私钥（私密 PEM 内嵌）
+  route add ID [MODE [DOMAINS_JSON IPS_JSON]]  从标准输入读取上游链接；MODE 默认 all
+  route delete ID                删除此节点的出站路由，恢复直连，需要确认
+  route show ID                  输出此节点出站路由的脱敏 JSON 摘要
   add vless-ws ID 名称 端口 地址 SNI PATH 证书路径 私钥路径 [UUID]
   add socks5 ID 名称 端口 地址 [用户名 密码]
   add anytls|hysteria2 ID 名称 端口 地址 SNI 证书路径 私钥路径 [密码]
@@ -53,7 +56,7 @@ xray-manager — Xray 中文交互管理
   schedule status|set HH:MM|disable 每日本机时区定时重启（停止的核心跳过）
   logs [行数]                    显示最近日志，默认 80 行
   diagnose                       检查版本、配置和服务健康
-  export /绝对路径/配置.json      导出全部节点/TLS PEM（0600），拒绝覆盖
+  export /绝对路径/配置.json      导出全部节点/出站路由/TLS PEM（0600），拒绝覆盖
   backup                         export 的兼容别名
   import /绝对路径/配置.json      校验导入全部节点，保留核心版本，需要确认
   restore                        import 的兼容别名
@@ -62,6 +65,7 @@ xray-manager — Xray 中文交互管理
 菜单回车接受默认值，:q 取消；地址回车自动探测公网 IP。
 端口与地址由节点配置指定；首次安装不开放任何公网监听。
 CLI 返回：0 成功，1 操作失败，2 参数错误或取消；中断 130/143。
+出站路由按节点独立设置，仅支持 Xray 入站；all 全部经上游，rules 按域名/IP 分流，未命中直连。
 支持 REALITY、XHTTP、SS2022、VLESS(ws)、SOCKS5；AnyTLS/HY2/TUICv5使用辅助核心；重复安装会备份并清退已移除类型的旧节点。
 升级/恢复会在原生校验及健康失败时回退；SIGKILL/断电需 diagnose 检查。
 HELP
@@ -88,7 +92,7 @@ xm_install_code() {
         mkdir -p -- "$XM_HOME/$file" || return 1
         chmod 0750 "$XM_HOME/$file" || return 1
     done
-    for file in xray-manager.sh install.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc; do
+    for file in xray-manager.sh install.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc; do
         [[ -f $XM_CODE_ROOT/$file ]] || { xm_error "程序文件缺失：$file"; return 1; }
         xm_atomic_copy "$XM_CODE_ROOT/$file" "$XM_HOME/$file" 0755 || return 1
     done
@@ -280,6 +284,97 @@ xm_edit_secret() {
         return 0
     done
 }
+# URI credentials remain in shell memory/stdin, never in a child argv. Read at
+# most one bounded line, hide TTY input, and accept a final line without LF.
+xm_route_read_uri() {
+    local reply='' result
+    [[ ! -t 0 ]] || printf '%s上游节点链接 [隐藏；:q 取消]：%s' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
+    IFS= read -r -s -n 8193 reply; result=$?
+    [[ ! -t 0 ]] || printf '\n' >&2
+    [[ $reply != :q ]] || { xm_info '已取消。'; return 2; }
+    [[ $result == 0 || -n $reply ]] || { xm_error '未读取到上游节点链接，已取消。'; return 2; }
+    [[ -n $reply && ${#reply} -le 8192 ]] && xm_input_safe "$reply" || { xm_error '上游链接须为单行，最多 8192 字符，不能含控制字符。'; return 2; }
+    XM_ROUTE_URI=$reply
+}
+xm_route_summary() {
+    local node=$1 route summary
+    if ! jq -e 'has("outbound_route")' <<< "$node" >/dev/null; then
+        jq '{id,enabled:false,mode:"direct"}' <<< "$node"; return $?
+    fi
+    route=$(jq -c .outbound_route <<< "$node") || return 1
+    summary=$(printf '%s' "$route" | protocol_outbound_summary) || return 1
+    printf '%s\0' "$node" "$summary" | jq -Rsc 'split("\u0000") as $v | ($v[0]|fromjson) as $n | ($v[1]|fromjson) + {id:$n.id,enabled:true,mode:$n.outbound_route.mode,domain_count:($n.outbound_route.domains|length),ip_count:($n.outbound_route.ips|length)}'
+}
+xm_route_display() {
+    local summary mode endpoint
+    summary=$(xm_route_summary "$1") || return 1
+    if [[ $(jq -r .enabled <<< "$summary") == false ]]; then xm_info '出站路由：直连（未添加上游）。'; return 0; fi
+    if [[ $(jq -r .mode <<< "$summary") == all ]]; then mode='全部经上游'
+    else mode="指定域名/IP 经上游；未匹配直连（域名 $(jq -r .domain_count <<< "$summary") / IP $(jq -r .ip_count <<< "$summary")）"; fi
+    endpoint=$(jq -r 'if (.address|contains(":")) then "["+.address+"]:"+(.port|tostring) else .address+":"+(.port|tostring) end' <<< "$summary") || return 1
+    printf '%s出站路由%s  %s\n%s上游节点%s  %s · %s\n' "$XM_UI_CYAN" "$XM_UI_RESET" "$mode" "$XM_UI_CYAN" "$XM_UI_RESET" "$(jq -r .protocol <<< "$summary")" "$endpoint" >&2
+}
+xm_route_commit() {
+    local original=$1 candidate=$2 prompt=$3 id actual
+    id=$(jq -r .id <<< "$original") || return 1
+    [[ $candidate != "$original" ]] || { xm_info '出站路由未变化，无须保存。'; return 0; }
+    protocol_validate_node "$candidate" && xm_route_display "$candidate" || return 1
+    xm_confirm "$prompt" || return 2
+    xm_ready || return 1
+    actual=$(jq -ec --arg id "$id" '.nodes[]|select(.id==$id)' "$XM_STATE") || { xm_error '节点已删除，请重新选择。'; return 1; }
+    [[ $actual == "$original" ]] || { xm_error '节点信息已变化，请重新选择并设置出站路由。'; return 1; }
+    xm_selected_unchanged "$id" && protocol_validate_node "$candidate" && xm_work_begin || return 1
+    jq --arg id "$id" --slurpfile state "$XM_STATE" '. as $node | $state[0] | .nodes|=map(if .id==$id then $node else . end)' <<< "$candidate" > "$XM_WORK_DIR/state.json" || return 1
+    state_apply "$XM_WORK_DIR/state.json" '' maintenance || return 1
+    xm_success "节点 $id 的出站路由已保存。"
+}
+xm_route() {
+    local action=${1:-} id original candidate route mode domains ips XM_ROUTE_URI prompt
+    (($# >= 2)) || { xm_usage_error 'route add|delete|show ID；add 从标准输入读取链接。'; return 2; }
+    shift; id=$1; shift
+    case $action in
+        add) (($# <= 3)) || { xm_usage_error 'route add ID [all|rules [DOMAINS_JSON IPS_JSON]]；链接须从标准输入读取。'; return 2; }; mode=${1:-all}; domains=${2:-[]}; ips=${3:-[]} ;;
+        delete|show) (($# == 0)) || { xm_usage_error 'route delete/show 只接受节点 ID。'; return 2; } ;;
+        *) xm_usage_error 'route 仅支持 add、delete、show。'; return 2 ;;
+    esac
+    xm_ready || return 1
+    original=$(jq -ec --arg id "$id" '.nodes[]|select(.id==$id)' "$XM_STATE") || { xm_error '节点不存在。'; return 1; }
+    xm_selected_unchanged "$id" || return 1
+    xm_unlock
+    case $action in
+        show) xm_route_summary "$original"; return $? ;;
+        delete)
+            jq -e 'has("outbound_route")' <<< "$original" >/dev/null || { xm_info '此节点没有出站路由，无须删除。'; return 0; }
+            candidate=$(jq -c 'del(.outbound_route)' <<< "$original") || return 1
+            prompt="删除节点 $id 的出站路由并恢复直连？" ;;
+        add)
+            case $(jq -r .type <<< "$original") in anytls|hysteria2|tuicv5) xm_error '辅助核心节点暂不支持 Xray 出站路由，请选择 REALITY/XHTTP/SS2022/WS/SOCKS5 节点。'; return 2 ;; esac
+            xm_route_read_uri || return $?
+            route=$(protocol_outbound_route "$XM_ROUTE_URI" "$mode" "$domains" "$ips") || return 1
+            unset XM_ROUTE_URI
+            candidate=$(printf '%s\0' "$original" "$route" | jq -Rsc 'split("\u0000") as $v | ($v[0]|fromjson) + {outbound_route:($v[1]|fromjson)}') || return 1
+            if jq -e 'has("outbound_route")' <<< "$original" >/dev/null; then prompt="替换节点 $id 已有的出站路由？"
+            else prompt="为节点 $id 添加出站路由？"; fi ;;
+    esac
+    xm_route_commit "$original" "$candidate" "$prompt"
+}
+xm_menu_route_add() {
+    local node=$1 id XM_CHOICE XM_DOMAINS='[]' XM_IPS='[]' mode
+    id=$(jq -r .id <<< "$node") || return 1
+    xm_ui_heading '添加出站路由'
+    xm_ui_item 1 '全部经上游'; xm_ui_item 2 '指定域名/IP 分流'; xm_ui_item 0 '返回'
+    while :; do
+        xm_read XM_CHOICE '路由模式编号' '1' || return 2
+        case $XM_CHOICE in 0) return 0 ;; 1) mode=all; break ;; 2) mode=rules; break ;; *) xm_error '请输入 1、2 或 0。' ;; esac
+    done
+    if [[ $mode == rules ]]; then
+        xm_info '域名和 IP 使用 JSON 数组；至少一项非空，两类规则独立匹配，未匹配直连。'
+        xm_read XM_DOMAINS '域名规则数组，例如 ["domain:example.com"]' '[]' || return 2
+        xm_read XM_IPS 'IP/CIDR 规则数组，例如 ["203.0.113.0/24"]' '[]' || return 2
+    fi
+    xm_info '请粘贴上游节点链接；链接和密码保持隐藏。已有路由将明确确认后替换。'
+    xm_dispatch route add "$id" "$mode" "$XM_DOMAINS" "$XM_IPS"
+}
 xm_menu_edit() {
     local original=$1 field=${2:-} type id XM_CHOICE XM_VALUE XM_PRIVATE XM_PUBLIC XM_CERT XM_KEY XM_SNI XM_CONFIRM candidate index
     local -a fields=(port address) captions=('监听端口' '对外地址（IP/域名）')
@@ -358,11 +453,16 @@ xm_menu_node_details() {
         printf '%s%s%s  %s%s%s\n' "$XM_UI_CYAN" "$label" "$XM_UI_RESET" "$XM_UI_GREEN" "$value" "$XM_UI_RESET" >&2
     done
     xm_info '凭据保持隐藏；查看客户端链接请选择“分享链接”。'
+    xm_route_display "$node" || return 1
     printf '\n' >&2
     xm_ui_item 1 '修改名称'; xm_ui_item 2 '修改端口'; xm_ui_item 3 '修改 IP/地址'
     local has_sni=0
     if jq -e 'has("sni")' <<< "$node" >/dev/null; then has_sni=1; xm_ui_item 4 '修改 SNI'; fi
-    xm_ui_item 5 '更多配置'; xm_ui_item 0 '返回'
+    xm_ui_item 5 '更多配置'
+    local has_route_support=1
+    case $(jq -r .type <<< "$node") in anytls|hysteria2|tuicv5) has_route_support=0 ;; esac
+    if [[ $has_route_support == 1 ]]; then xm_ui_item 6 '添加出站路由'; xm_ui_item 7 '删除出站路由'; fi
+    xm_ui_item 0 '返回'
     while :; do
         xm_read XM_CHOICE '节点操作编号' '0' || return 2
         case $XM_CHOICE in
@@ -372,6 +472,8 @@ xm_menu_node_details() {
             3) xm_menu_edit "$node" address; return $? ;;
             4) if [[ $has_sni == 1 ]]; then xm_menu_edit "$node" sni; return $?; fi; xm_error '此协议没有 SNI，请选择已显示的编号。' ;;
             5) xm_menu_edit "$node"; return $? ;;
+            6) if [[ $has_route_support == 1 ]]; then xm_menu_route_add "$node"; return $?; fi; xm_error '此辅助核心节点暂不支持 Xray 出站路由。' ;;
+            7) if [[ $has_route_support == 1 ]]; then xm_dispatch route delete "$(jq -r .id <<< "$node")"; return $?; fi; xm_error '此辅助核心节点暂不支持 Xray 出站路由。' ;;
             *) xm_error '请输入已显示的节点操作编号或 0。' ;;
         esac
     done
@@ -519,7 +621,7 @@ xm_update_manager() (
     xm_ready && xm_need_commands curl sha256sum head sh || return 1
     local executing=0 preserve_backup=0
     local update_dir ref_sha runtime_sha file code_state core_digest before_state restore_failed=0
-    local -a code_files=(xray-manager.sh install.sh deploy.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc)
+    local -a code_files=(xray-manager.sh install.sh deploy.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc)
     update_dir=$(mktemp -d) || return 1
     chmod 0700 "$update_dir" || { rm -rf -- "$update_dir"; return 1; }
     trap 'if [[ $preserve_backup == 0 ]]; then rm -rf -- "$update_dir"; fi; xm_unlock' EXIT
@@ -592,6 +694,7 @@ xm_dispatch() {
         list) xm_list "$@" ;;
         add) xm_add "$@" ;;
         edit) xm_edit "$@" ;;
+        route) xm_route "$@" ;;
         delete) xm_delete "$@" ;;
         share) xm_share "$@" ;;
         service) xm_service "$@" ;;

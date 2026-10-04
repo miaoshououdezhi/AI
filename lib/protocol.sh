@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 # No side effects when sourced. Secrets are passed through stdin, not child argv.
+_XM_PROTOCOL_OUTBOUND="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../assets" 2>/dev/null && pwd)/xray-outbound.py"
+
+protocol_outbound_route() {
+    [[ $# == 4 ]] || { _protocol_error '需要节点链接 MODE DOMAINS_JSON IPS_JSON'; return 1; }
+    printf '%s\0' "$1" "$2" "$3" "$4" | "${XM_PYTHON:-python3}" "$_XM_PROTOCOL_OUTBOUND" route
+}
+
+protocol_outbound_summary() {
+    [[ $# == 0 ]] || { _protocol_error '请通过标准输入提供出站路由对象'; return 1; }
+    "${XM_PYTHON:-python3}" "$_XM_PROTOCOL_OUTBOUND" summary
+}
+
 _protocol_error() {
     if declare -F xm_error >/dev/null; then xm_error "协议：$*"
     else printf '[错误] 协议：%s\n' "$*" >&2; fi
@@ -10,6 +22,7 @@ protocol_validate_node() {
     [[ $# == 1 || $# == 2 ]] || { _protocol_error '需要节点 JSON [strict|maintenance]'; return 1; }
     local mode=${2:-strict}
     [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
+    printf '%s' "$1" | "${XM_PYTHON:-python3}" "$_XM_PROTOCOL_OUTBOUND" validate-node || return 1
     printf '%s' "$1" | "${XM_PYTHON:-python3}" -c '
 
 import base64, datetime, ipaddress, json, os, re, subprocess, sys, unicodedata, uuid
@@ -39,7 +52,7 @@ try:
     t=text(n,"type"); common={"id","name","type","port","address"}
     extras={"vless-reality":{"uuid","private_key","public_key","short_id","sni","target"},"vless-xhttp":{"uuid","private_key","public_key","short_id","sni","target","path","mode"},"shadowsocks":{"method","password"},"vless-ws":{"uuid","sni","path","tls_cert","tls_key"},"socks5":{"username","password"},"anytls":{"sni","tls_cert","tls_key","password"},"hysteria2":{"sni","tls_cert","tls_key","password"},"tuicv5":{"sni","tls_cert","tls_key","uuid","password"}}
     need(t in extras,"未知协议")
-    need(set(n)==common|extras[t],"节点字段缺失或含未知字段")
+    need(set(n)-{"outbound_route"}==common|extras[t],"节点字段缺失或含未知字段")
     need(bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,31}",text(n,"id"))),"节点 ID 无效")
     text(n,"name",1,128)
     p=n.get("port"); need(type(p)==int and 1<=p<=65535,"端口必须是 1..65535 整数")
@@ -187,7 +200,7 @@ except OSError as e:
     if [[ $listen == 0.0.0.0 ]] && jq -e '.nodes|any(.address|contains(":"))' "$state" >/dev/null; then
         _protocol_error '当前服务器 IPv6 不可用，请使用 IPv4 地址或域名'; return 1
     fi
-    (umask 077; : > "$output"; chmod 600 "$output" || exit 1; jq --arg listen "$listen" '
+    (umask 077; : > "$output"; chmod 600 "$output" || exit 1; jq -c --arg listen "$listen" '
         {log:{loglevel:"warning",access:"none"},inbounds:[.nodes[]|select(.type=="vless-reality" or .type=="vless-xhttp" or .type=="shadowsocks" or .type=="vless-ws" or .type=="socks5")|
           {tag:("node-"+.id),listen:$listen,port:.port}+
           (if .type=="vless-reality" then
@@ -200,7 +213,7 @@ except OSError as e:
             {protocol:"socks",settings:{auth:"password",accounts:[{user:.username,pass:.password}],udp:true}}
           else {protocol:"shadowsocks",settings:{method:.method,password:.password,network:"tcp,udp"}}
           end)],outbounds:[{tag:"direct",protocol:"freedom",settings:{}},{tag:"block",protocol:"blackhole",settings:{}}],routing:{domainStrategy:"IPOnDemand",rules:[{type:"field",ip:["0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16","172.16.0.0/12","192.168.0.0/16","198.18.0.0/15","224.0.0.0/4","240.0.0.0/4","::/128","::1/128","64:ff9b:1::/48","100::/64","fc00::/7","fe80::/10","ff00::/8"],outboundTag:"block"}]}}
-    ' "$state" > "$output") || return 1
+    ' "$state" | { jq -c . "$state"; cat; } | "${XM_PYTHON:-python3}" "$_XM_PROTOCOL_OUTBOUND" augment > "$output") || return 1
     chmod 600 "$output"
 }
 

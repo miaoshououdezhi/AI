@@ -17,7 +17,7 @@ jobs:
           sh -n install.sh
           sh -n deploy.sh
           sh -n assets/xy
-          python3 -c 'import ast,pathlib; ast.parse(pathlib.Path("assets/xray-manager-restart.py").read_text())'
+          python3 -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("assets").glob("*.py")]'
           shellcheck -x -S warning xray-manager.sh install.sh deploy.sh lib/*.sh tests/*.sh
       - name: Shell transactions
         run: bash tests/test-shell.sh
@@ -27,6 +27,10 @@ jobs:
         run: bash tests/test-manager-update.sh
       - name: Node edits and state transactions
         run: bash tests/test-edit.sh
+      - name: Per-node outbound routes, migration and rollback
+        run: bash tests/test-outbound-route.sh
+      - name: Outbound URI parsing and route generation
+        run: bash tests/test-outbound-protocol.sh
       - name: Portable migration and dual-core transactions
         run: bash tests/test-migration.sh
       - name: Terminal labels and pause behavior
@@ -72,6 +76,7 @@ jobs:
               protocol_generate "$XM_ETC/state.json" "$XM_ETC/config.json" || exit 1
               "$XM_BIN" run -test -config "$XM_ETC/config.json" || exit 1
               XRAY_BIN="$XM_BIN" bash /src/tests/test-xhttp.sh || exit 1
+              XRAY_BIN="$XM_BIN" bash /src/tests/test-outbound-protocol.sh || exit 1
               primary_smoke_bin=$XM_BIN
               export XM_ROOT=
               source /src/lib/common.sh
