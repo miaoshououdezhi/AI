@@ -2,7 +2,7 @@
 # xray-manager: the public CLI and compact Chinese terminal interface.
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
     if [[ -t 2 && -z ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
-        printf '\033[91m[错误] 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\033[0m\n' >&2
+        printf '\033[38;2;255;0;0m[错误] 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\033[0m\n' >&2
     else
         printf '[错误] 需要 Bash 4.4 或更新版本，请运行 sh install.sh。\n' >&2
     fi
@@ -34,6 +34,7 @@ xray-manager — Xray 中文交互管理
 无参数：打开交互菜单；help：显示本帮助。
 
   install [v版本]                 安装，默认 v26.3.27；重复安装保留节点
+  update-manager                 获取项目 main 的最新管理脚本（保留核心/节点）
   upgrade v版本                  指定核心版本升级，保留上一版供回退
   rollback                       切换到上一版核心
   list                           列出节点（不显示秘密）
@@ -269,7 +270,7 @@ xm_edit_secret() {
     local variable=$1 prompt=$2 default=$3 reply
     [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
     while :; do
-        printf '%s [回车保持现有值；隐藏]：' "$prompt" >&2
+        printf '%s%s [回车保持现有值；隐藏]：%s' "$XM_UI_CYAN" "$prompt" "$XM_UI_RESET" >&2
         IFS= read -r -s reply || { printf '\n' >&2; return 2; }
         printf '\n' >&2
         [[ $reply != :q ]] || return 2
@@ -309,7 +310,14 @@ xm_menu_edit() {
             xm_error '请输入列表中的配置编号或 0。'
         done
     else
-        index=0; captions=('显示名称')
+        index=0
+        case $field in
+            name) captions=('显示名称') ;;
+            port) captions=('监听端口') ;;
+            address) captions=('对外地址（IP/域名）') ;;
+            sni) captions=('SNI（TLS类型须匹配证书SAN）') ;;
+            *) xm_error '未知快捷字段。'; return 2 ;;
+        esac
     fi
     xm_info '回车保留当前值；:q 取消。ID 与协议类型固定，秘密不默认回显。'
     while :; do
@@ -351,10 +359,21 @@ xm_menu_node_details() {
     done
     xm_info '凭据保持隐藏；查看客户端链接请选择“分享链接”。'
     printf '\n' >&2
-    xm_ui_item 1 '修改名称'; xm_ui_item 2 '修改节点配置'; xm_ui_item 0 '返回'
+    xm_ui_item 1 '修改名称'; xm_ui_item 2 '修改端口'; xm_ui_item 3 '修改 IP/地址'
+    local has_sni=0
+    if jq -e 'has("sni")' <<< "$node" >/dev/null; then has_sni=1; xm_ui_item 4 '修改 SNI'; fi
+    xm_ui_item 5 '更多配置'; xm_ui_item 0 '返回'
     while :; do
         xm_read XM_CHOICE '节点操作编号' '0' || return 2
-        case $XM_CHOICE in 0) return 0 ;; 1) xm_menu_edit "$node" name; return $? ;; 2) xm_menu_edit "$node"; return $? ;; *) xm_error '请输入 0、1 或 2。' ;; esac
+        case $XM_CHOICE in
+            0) return 0 ;;
+            1) xm_menu_edit "$node" name; return $? ;;
+            2) xm_menu_edit "$node" port; return $? ;;
+            3) xm_menu_edit "$node" address; return $? ;;
+            4) if [[ $has_sni == 1 ]]; then xm_menu_edit "$node" sni; return $?; fi; xm_error '此协议没有 SNI，请选择已显示的编号。' ;;
+            5) xm_menu_edit "$node"; return $? ;;
+            *) xm_error '请输入已显示的节点操作编号或 0。' ;;
+        esac
     done
 }
 
@@ -487,6 +506,79 @@ xm_uninstall() {
     platform_clean_uninstall || return 1
     xm_success '完全卸载完成；用户外部导出和证书保留。'
 }
+# Fixed GitHub endpoints only. Bound response bytes even on older curl versions.
+xm_manager_fetch() (
+    set -o pipefail
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 90 --max-filesize 1048576 "$1" | head -c 1048577 > "$2" || return 1
+    [[ $(wc -c < "$2") -le 1048576 ]]
+)
+xm_update_manager() (
+    (($# == 0)) || { xm_usage_error 'update-manager 不接受参数。'; return 2; }
+    [[ -z $XM_ROOT ]] || { xm_error '隔离模式不能执行宿主部署入口，请在真实安装环境更新管理脚本。'; return 1; }
+    xm_ready && xm_need_commands curl sha256sum head sh || return 1
+    local executing=0 preserve_backup=0
+    local update_dir ref_sha runtime_sha file code_state core_digest before_state restore_failed=0
+    local -a code_files=(xray-manager.sh install.sh deploy.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc)
+    update_dir=$(mktemp -d) || return 1
+    chmod 0700 "$update_dir" || { rm -rf -- "$update_dir"; return 1; }
+    trap 'if [[ $preserve_backup == 0 ]]; then rm -rf -- "$update_dir"; fi; xm_unlock' EXIT
+    trap 'if [[ $executing == 1 ]]; then preserve_backup=1; xm_error "更新执行被中断；管理代码备份保留于 $update_dir/code，请检查安装状态。"; fi; exit 130' INT
+    trap 'if [[ $executing == 1 ]]; then preserve_backup=1; xm_error "更新执行被中断；管理代码备份保留于 $update_dir/code，请检查安装状态。"; fi; exit 143' TERM
+    trap 'if [[ $executing == 1 ]]; then preserve_backup=1; xm_error "更新执行被中断；管理代码备份保留于 $update_dir/code，请检查安装状态。"; fi; exit 129' HUP
+    before_state=$(sha256sum "$XM_STATE") || return 1
+    core_digest=$(sha256sum "$XM_BIN") || return 1
+    xm_unlock
+    xm_info '正在查询项目 main 的最新管理脚本。'
+    xm_manager_fetch 'https://api.github.com/repos/miaoshououdezhi/AI/git/ref/heads/main' "$update_dir/ref.json" || { xm_error '查询失败或响应超过 1 MiB，未修改安装。'; return 1; }
+    ref_sha=$(jq -er 'select(.ref=="refs/heads/main" and .object.type=="commit") | .object.sha | select(type=="string" and test("^[0-9a-f]{40}$"))' "$update_dir/ref.json") || { xm_error 'GitHub main 引用格式无效，未修改安装。'; return 1; }
+    xm_manager_fetch "https://raw.githubusercontent.com/miaoshououdezhi/AI/$ref_sha/deploy.sh" "$update_dir/deploy.sh" || { xm_error '下载失败或脚本超过 1 MiB，未修改安装。'; return 1; }
+    sh -n "$update_dir/deploy.sh" || { xm_error '下载脚本语法无效，未修改安装。'; return 1; }
+    runtime_sha=$(sed -n 's@^[[:space:]]*https://github.com/miaoshououdezhi/AI/archive/\([0-9a-f]\{40\}\)\.tar\.gz[[:space:]]*$@\1@p' "$update_dir/deploy.sh")
+    [[ $runtime_sha =~ ^[0-9a-f]{40}$ ]] || { xm_error '下载脚本缺少唯一的本项目固定运行版本，未执行。'; return 1; }
+    xm_info "项目 main 提交：$ref_sha"
+    xm_info "部署脚本固定运行提交：$runtime_sha"
+    xm_warning '仅更新管理脚本；保持现有核心及节点。失败会恢复管理代码，软件包副作用不能由代码备份撤销。'
+    xm_confirm '获取并安装上述最新管理脚本？' || return 2
+    xm_ready || return 1
+    [[ $(sha256sum "$XM_STATE") == "$before_state" && $(sha256sum "$XM_BIN") == "$core_digest" ]] || { xm_error '确认期间核心或节点已变化，请重新执行更新。'; return 1; }
+    # Only fixed, previously owned ordinary code files are backed up. Never
+    # snapshot or overwrite node/core data when restoring manager code.
+    for file in lib assets; do xm_path_no_links "$XM_HOME/$file" || { xm_error '管理代码目录含符号链接，拒绝更新。'; return 1; }; done
+    mkdir "$update_dir/code" || return 1
+    for file in "${code_files[@]}"; do
+        xm_path_no_links "$XM_HOME/$file" || { xm_error '管理代码路径含符号链接，拒绝更新。'; return 1; }
+        if [[ -e $XM_HOME/$file ]]; then
+            [[ -f $XM_HOME/$file ]] || { xm_error '管理代码不是普通文件，拒绝更新。'; return 1; }
+            if [[ -z $XM_ROOT && $(stat -c %u "$XM_HOME/$file") != 0 ]]; then xm_error '管理代码不属于 root，拒绝更新。'; return 1; fi
+            if [[ $file == */* ]]; then mkdir -p "$update_dir/code/${file%/*}" || return 1; fi
+            cp -p -- "$XM_HOME/$file" "$update_dir/code/$file" || return 1
+        fi
+    done
+    code_state=$(find "$update_dir/code" -type f | wc -l) || return 1
+    [[ $code_state -gt 0 ]] || { xm_error '没有可恢复的管理代码，拒绝更新。'; return 1; }
+    xm_unlock
+    xm_info '正在通过项目部署入口更新管理脚本。'
+    executing=1
+    if ! sh "$update_dir/deploy.sh"; then
+        xm_lock || { xm_error "更新失败且无法取得恢复锁；代码备份保留于 $update_dir/code。"; preserve_backup=1; return 1; }
+        for file in "${code_files[@]}"; do
+            if [[ -f $update_dir/code/$file ]]; then
+                xm_path_no_links "$XM_HOME/$file" && xm_atomic_copy "$update_dir/code/$file" "$XM_HOME/$file" "$(stat -c %a "$update_dir/code/$file")" || restore_failed=1
+            elif [[ -e $XM_HOME/$file || -L $XM_HOME/$file ]]; then
+                xm_path_no_links "$XM_HOME/$file" && [[ -f $XM_HOME/$file ]] && rm -f -- "$XM_HOME/$file" || restore_failed=1
+            fi
+        done
+        if [[ $restore_failed == 1 ]]; then xm_error "更新失败，管理代码未完全恢复；备份保留于 $update_dir/code。"; preserve_backup=1
+        else xm_error '更新失败，已恢复原管理代码；节点及核心数据未由恢复步骤改写。请检查上方安装日志。'; fi
+        executing=0
+        return 1
+    fi
+    executing=0
+    if [[ $(sha256sum "$XM_BIN") != "$core_digest" ]]; then xm_error '管理脚本安装返回成功，但核心文件发生变化，请运行 xy diagnose 检查。'; return 1; fi
+    if [[ $(sha256sum "$XM_STATE") != "$before_state" ]]; then xm_warning '更新期间节点状态发生变化，已保留当前状态；未覆盖可能的并发修改。'; fi
+    xm_success '管理脚本更新完成。请重新运行 xy，加载新菜单和模块。'
+)
+
 xm_dispatch() {
     local command=${1:-menu} result
     (($# == 0)) || shift
@@ -494,6 +586,7 @@ xm_dispatch() {
         help|-h|--help) xm_help ;;
         install) xm_install "$@" ;;
         upgrade) xm_upgrade "$@" ;;
+        update-manager) xm_update_manager "$@" ;;
         rollback) xm_rollback "$@" ;;
         list) xm_list "$@" ;;
         add) xm_add "$@" ;;
@@ -538,7 +631,7 @@ xm_menu_node() {
     xm_menu_ready || return 1
     snapshot=$(jq -ec '.nodes' "$XM_STATE") || return 1
     mapfile -t nodes < <(jq -c '.[]' <<< "$snapshot")
-    case $action in view) title='查看节点' ;; share) title='分享链接' ;; delete) title='删除节点' ;; *) return 2 ;; esac
+    case $action in view) title='节点管理（查看/修改）' ;; share) title='分享链接' ;; delete) title='删除节点' ;; *) return 2 ;; esac
     xm_ui_heading "$title"
     if ((${#nodes[@]} == 0)); then xm_info '尚无节点，请先添加节点。'; return 0; fi
     for ((index=0; index<${#nodes[@]}; index++)); do
@@ -717,8 +810,10 @@ xm_menu_add() {
     case $type in
         vless-reality)
             xm_menu_draft "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" www.cloudflare.com www.cloudflare.com:443 || return 1
-            xm_menu_field XM_SNI sni 'REALITY SNI' 'www.cloudflare.com' || return 2
-            xm_menu_field XM_TARGET target 'REALITY 目标（域名:端口）' "${XM_SNI}:443" || return 2
+            xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'www.cloudflare.com' || return 2
+            XM_TARGET="${XM_SNI}:443"
+            xm_menu_validate_field target "$XM_TARGET" || return 1
+            xm_info "REALITY 目标自动设置为 $XM_TARGET；需要其他目标时可在节点更多配置中修改。"
             xm_info 'UUID、REALITY 密钥与 ShortID 已随机生成，秘密保持隐藏。'
             xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_SNI" "$XM_TARGET" "$(jq -r .uuid <<< "$XM_MENU_NODE")" "$(jq -r .private_key <<< "$XM_MENU_NODE")" "$(jq -r .public_key <<< "$XM_MENU_NODE")" "$(jq -r .short_id <<< "$XM_MENU_NODE")"
             ;;
@@ -730,8 +825,10 @@ xm_menu_add() {
             done
             [[ -n $XM_PATH ]] || { xm_error '随机路径生成失败，请重试。'; return 1; }
             xm_menu_draft "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" www.cloudflare.com www.cloudflare.com:443 "$XM_PATH" packet-up || return 1
-            xm_menu_field XM_SNI sni 'REALITY SNI' 'www.cloudflare.com' || return 2
-            xm_menu_field XM_TARGET target 'REALITY 目标（域名:端口）' "${XM_SNI}:443" || return 2
+            xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'www.cloudflare.com' || return 2
+            XM_TARGET="${XM_SNI}:443"
+            xm_menu_validate_field target "$XM_TARGET" || return 1
+            xm_info "REALITY 目标自动设置为 $XM_TARGET；需要其他目标时可在节点更多配置中修改。"
             xm_menu_field XM_PATH path 'XHTTP 路径（/开头，字母数字/_-）' "$XM_PATH" || return 2
             xm_menu_field XM_MODE mode 'XHTTP 模式（auto/packet-up/stream-up/stream-one）' packet-up || return 2
             xm_info 'UUID、REALITY 密钥与 ShortID 已随机生成，秘密保持隐藏。'
@@ -851,30 +948,33 @@ xm_menu_render() {
     if [[ -f $XM_STATE ]] && command -v jq >/dev/null 2>&1; then
         # Never render untrusted state text as ANSI: version has a strict alphabet.
         version=$(jq -r '.core_version | select(type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$XM_STATE" 2>/dev/null)
-        [[ -n $version ]] || version='状态异常'
+        [[ -n $version ]] || { version='状态异常'; status_color=$XM_UI_RED; }
         count=$(jq '.nodes|length' "$XM_STATE" 2>/dev/null); [[ $count =~ ^[0-9]+$ ]] || count='?'
         if platform_detect >/dev/null 2>&1 && xm_service_call status >/dev/null 2>&1; then status='运行中'; status_color=$XM_UI_GREEN; fi
     fi
     printf '\n' >&2
     if [[ $width =~ ^[0-9]+$ && $width -lt 60 ]]; then printf '%sXray 管理%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; else printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  Xray 管理  ·  xray-manager\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; fi
-    printf '\n  核心 %s\n  节点 %s  ·  %s%s%s\n' "$version" "$count" "$status_color" "$status" "$XM_UI_RESET" >&2
+    printf '\n  %s核心 %s%s\n  %s节点 %s%s  ·  %s%s%s\n' "$XM_UI_CYAN" "$XM_UI_GREEN" "$version" "$XM_UI_CYAN" "$XM_UI_GREEN" "$count" "$status_color" "$status" "$XM_UI_RESET" >&2
     if [[ $width =~ ^[0-9]+$ && $width -ge 60 ]]; then
         printf '\n' >&2
         printf '%s核心管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
         xm_ui_pair 1 '安装核心' 2 '选择版本并升级'; xm_ui_item 3 '核心回退'
+        xm_ui_item 14 '更新管理脚本'
         printf '\n%s节点管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-        xm_ui_pair 4 '查看节点' 5 '添加节点'; xm_ui_pair 6 '删除节点' 7 '分享链接'
+        xm_ui_item 4 '节点管理（查看/修改）'
+        xm_ui_pair 5 '添加节点' 6 '删除节点'; xm_ui_item 7 '分享链接'
         printf '\n%s运行维护%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
         xm_ui_pair 8 '服务操作' 9 '查看日志'; xm_ui_item 10 '运行诊断'
         printf '\n%s数据管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
         xm_ui_pair 11 '导出配置' 12 '导入配置'
-        printf '\n%s危险操作%s\n' "$XM_UI_RED" "$XM_UI_RESET" >&2
+        printf '\n%s危险操作%s\n' "$XM_UI_BLUE" "$XM_UI_RESET" >&2
         xm_ui_item 13 '完全卸载'
     else
         xm_ui_heading '核心管理'
         xm_ui_item 1 '安装核心'; xm_ui_item 2 '选择版本并升级'; xm_ui_item 3 '核心回退'
+        xm_ui_item 14 '更新管理脚本'
         xm_ui_heading '节点管理'
-        xm_ui_item 4 '查看节点'; xm_ui_item 5 '添加节点'; xm_ui_item 6 '删除节点'; xm_ui_item 7 '分享链接'
+        xm_ui_item 4 '节点管理（查看/修改）'; xm_ui_item 5 '添加节点'; xm_ui_item 6 '删除节点'; xm_ui_item 7 '分享链接'
         xm_ui_heading '运行维护'
         xm_ui_item 8 '服务操作'; xm_ui_item 9 '查看日志'; xm_ui_item 10 '运行诊断'
         xm_ui_heading '数据管理'
@@ -905,6 +1005,7 @@ xm_menu() {
             10) xm_dispatch diagnose ;;
             11) xm_menu_ready && xm_read XM_FILE '导出配置绝对路径' "/root/xray-manager-export-$(date +%Y%m%d-%H%M%S).json" && xm_dispatch export "$XM_FILE" ;;
             12) xm_menu_ready && xm_read XM_FILE '导入配置绝对路径' '' '选择已有导出文件；:q 取消' && xm_dispatch import "$XM_FILE" ;;
+            14) xm_dispatch update-manager && return 0 ;;
             13) xm_dispatch uninstall && { xm_pause; return 0; } ;;
             *) xm_error '选择无效，请输入菜单编号。' ;;
         esac

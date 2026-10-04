@@ -151,3 +151,25 @@ xm_menu_edit "$XM_SELECTED_NODE" < "$scratch/input" > /dev/null 2> "$scratch/men
 [[ $(jq -r '.nodes[1].private_key' "$XM_STATE") == "$menu_private" && $(jq -r '.nodes[1].public_key' "$XM_STATE") == "$menu_public" ]] || fail 'menu pair not saved'
 if grep -Fq "$menu_private" "$scratch/menu-pair.log"; then fail 'menu pair leaked private key'; fi
 pass 'CLI and menu pair/password/full-node jq processing keeps credentials out of child argv'
+
+# Detail shortcuts execute the authoritative edit path, preserving snapshots.
+XM_SELECTED_NODE=$(jq -c '.nodes[0]' "$XM_STATE")
+printf '2\n29871\nY\n' > "$scratch/input"
+xm_menu_node_details "$XM_SELECTED_NODE" < "$scratch/input" >/dev/null 2> "$scratch/shortcut-port.log" || fail 'detail port shortcut'
+[[ $(jq -r '.nodes[0].port' "$XM_STATE") == 29871 ]] || fail 'shortcut port not saved'
+grep -q '监听端口' "$scratch/shortcut-port.log" || fail 'port shortcut caption incorrect'
+XM_SELECTED_NODE=$(jq -c '.nodes[0]' "$XM_STATE")
+printf '3\n203.0.113.10\nY\n' > "$scratch/input"
+xm_menu_node_details "$XM_SELECTED_NODE" < "$scratch/input" >/dev/null 2> "$scratch/shortcut-address.log" || fail 'detail address shortcut'
+[[ $(jq -r '.nodes[0].address' "$XM_STATE") == 203.0.113.10 ]] || fail 'shortcut address not saved'
+grep -q '对外地址（IP/域名）' "$scratch/shortcut-address.log" || fail 'address shortcut caption incorrect'
+XM_SELECTED_NODE=$(jq -c '.nodes[0]' "$XM_STATE")
+printf '4\n0\n' > "$scratch/input"
+xm_menu_node_details "$XM_SELECTED_NODE" < "$scratch/input" >/dev/null 2> "$scratch/no-sni.log" || fail 'unsupported SNI selection handling'
+if grep -q '\[4\].*修改 SNI' "$scratch/no-sni.log"; then fail 'SS exposed SNI shortcut'; fi
+XM_SELECTED_NODE=$(jq -c '.nodes[1]' "$XM_STATE")
+printf '4\nwww.cloudflare.com\nY\n' > "$scratch/input"
+xm_menu_node_details "$XM_SELECTED_NODE" < "$scratch/input" >/dev/null 2> "$scratch/shortcut-sni.log" || fail 'detail SNI shortcut'
+[[ $(jq -r '.nodes[1].sni' "$XM_STATE") == www.cloudflare.com ]] || fail 'shortcut SNI not saved'
+grep -q 'SNI（TLS类型须匹配证书SAN）' "$scratch/shortcut-sni.log" || fail 'SNI shortcut caption incorrect'
+pass 'details edit port/address/SNI through real transactions and omit unsupported SNI'

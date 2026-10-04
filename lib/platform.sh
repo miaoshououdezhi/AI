@@ -18,7 +18,7 @@ _platform_python() (
     set -o pipefail
     export _XM_PY_CYAN='' _XM_PY_YELLOW='' _XM_PY_RED='' _XM_PY_RESET=''
     if [[ -t 2 && ! ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]]; then
-        _XM_PY_CYAN=$'\033[96m'; _XM_PY_YELLOW=$'\033[93m'; _XM_PY_RED=$'\033[91m'; _XM_PY_RESET=$'\033[0m'
+        _XM_PY_CYAN=$'\033[38;2;0;255;255m'; _XM_PY_YELLOW=$'\033[38;2;0;191;255m'; _XM_PY_RED=$'\033[38;2;255;0;0m'; _XM_PY_RESET=$'\033[0m'
     fi
     {
         cat <<'PYLABEL'

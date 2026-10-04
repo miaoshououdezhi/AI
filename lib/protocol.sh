@@ -91,8 +91,8 @@ try:
         need(len(raw)==16 and base64.b64encode(raw).decode()==pwd,"SS2022 密码必须是 16 字节标准 Base64 密钥")
 except (ValueError,TypeError,KeyError,OSError) as e:
     color=os.environ.get("XM_UI_RED","") if sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM","dumb")!="dumb" else ""
-    color=color if color=="\x1b[91m" else ""
-    print(color+"[错误]"+("\x1b[0m" if color else "")+" 协议："+str(e),file=sys.stderr); sys.exit(1)
+    color=color if color=="\x1b[38;2;255;0;0m" else ""
+    print(color+"[错误] 协议："+str(e)+("\x1b[0m" if color else ""),file=sys.stderr); sys.exit(1)
 ' "$mode"
 }
 
@@ -269,8 +269,8 @@ try:
     print(json.dumps({"sni":sni,"tls_cert":values[0],"tls_key":values[1]}))
 except (OSError,ValueError,UnicodeError) as e:
     color=os.environ.get("XM_UI_RED","") if sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM","dumb")!="dumb" else ""
-    color=color if color=="\x1b[91m" else ""
-    print(color+"[错误]"+("\x1b[0m" if color else "")+" 协议："+str(e),file=sys.stderr);sys.exit(1)
+    color=color if color=="\x1b[38;2;255;0;0m" else ""
+    print(color+"[错误] 协议："+str(e)+("\x1b[0m" if color else ""),file=sys.stderr);sys.exit(1)
 ') || return 1
     probe=$(printf '%s' "$tls" | jq -c '.+{id:"tlsprobe",name:"TLS probe",type:"anytls",port:443,address:.sni,password:"fixture-validation-password"}') || return 1
     protocol_validate_node "$probe" || return 1

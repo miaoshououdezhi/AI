@@ -105,11 +105,11 @@ pass 'four releases/dates, explicit second confirmation, manual fallback, return
 xm_ui_init
 COLUMNS=80 xm_menu_render 2> "$TEST_ROOT/wide.log"
 COLUMNS=40 xm_menu_render 2> "$TEST_ROOT/narrow.log"
-[[ $(wc -l < "$TEST_ROOT/wide.log") -le 32 ]] || fail 'wide menu exceeds 32 lines'
+[[ $(wc -l < "$TEST_ROOT/wide.log") -le 34 ]] || fail 'wide menu exceeds 34 lines'
 grep -q '\[1\].*\[2\]' "$TEST_ROOT/wide.log" || fail 'wide menu not two columns'
 if grep -q '\[1\].*\[2\]' "$TEST_ROOT/narrow.log"; then fail 'narrow menu still two columns'; fi
 if LC_ALL=C grep -q $'\033' "$TEST_ROOT/wide.log"; then fail 'non-TTY contains ANSI'; fi
-pass 'wide menu fits 32 lines, narrow menu uses one column, non-TTY output is plain'
+pass 'wide menu fits 34 lines, narrow menu uses one column, non-TTY output is plain'
 
 # Real PTYs verify the TTY gate, NO_COLOR presence, and TERM=dumb behavior.
 python3 - "$TEST_REPO" <<'PY'
@@ -199,6 +199,20 @@ if xm_node_unique_secrets "$TEST_FIRST_XHTTP" >/dev/null 2>&1; then fail 'collid
 xm_node_unique_secrets "$TEST_SECOND_XHTTP" || fail 'independent random keys rejected'
 state_empty v26.3.27 > "$XM_STATE"
 pass 'XHTTP REALITY defaults validate, change per request and reject reused path/credentials'
+
+# One SNI prompt automatically selects and validates the target for both types.
+for TEST_PROTOCOL_CHOICE in 1 2; do
+    printf '%s\n\n\n\n8.8.4.4\nwww.example.com\n\n\n' "$TEST_PROTOCOL_CHOICE" > "$TEST_ROOT/input"
+    xm_menu_add < "$TEST_ROOT/input" >/dev/null 2> "$TEST_ROOT/sni-once.log" || fail 'single SNI interaction'
+    jq -e '.[6]=="www.example.com" and .[7]=="www.example.com:443"' "$TEST_CALL" >/dev/null || fail 'automatic target differs from SNI'
+    [[ $(grep -o 'REALITY SNI（域名/IPv4）' "$TEST_ROOT/sni-once.log" | wc -l) == 1 ]] || fail 'SNI prompted more than once'
+    if grep -q 'REALITY 目标（域名:端口）' "$TEST_ROOT/sni-once.log"; then fail 'target prompted separately'; fi
+    grep -q '更多配置' "$TEST_ROOT/sni-once.log" || fail 'automatic target explanation missing'
+    mapfile -t TEST_ARGS < <(jq -r '.[]' "$TEST_CALL")
+    protocol_new "${TEST_ARGS[@]:1}" >/dev/null || fail 'single SNI node invalid'
+done
+pass 'REALITY and XHTTP ask SNI once, use SNI:443 and validate the resulting node'
+
 
 # Use the real dispatcher/schedule functions, replacing only platform effects.
 # shellcheck disable=SC1090

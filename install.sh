@@ -10,8 +10,8 @@ xray_boot_message() {
         printf '[%s] %s\n' "$xray_boot_label" "$*" >&2
     fi
 }
-xray_boot_error() { xray_boot_message 91 '错误' "$@"; }
-xray_boot_info() { xray_boot_message 96 '信息' "$@"; }
+xray_boot_error() { xray_boot_message '38;2;255;0;0' '错误' "$@"; }
+xray_boot_info() { xray_boot_message '38;2;0;255;255' '信息' "$@"; }
 umask 077
 xray_snapshot_tmp=
 cleanup() { [ -z "$xray_snapshot_tmp" ] || rm -rf -- "$xray_snapshot_tmp"; }
