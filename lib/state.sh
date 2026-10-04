@@ -17,13 +17,13 @@ state_validate() {
     [[ -f $file && ! -L $file ]] || { xm_error '状态必须是普通 JSON 文件。'; return 1; }
     bytes=$(wc -c < "$file") || return 1
     ((bytes <= 16777216)) || { xm_error '配置文件超过 16 MiB。'; return 1; }
-    jq -e 'type == "object" and ((keys | sort) == ["core_version","nodes","schema_version"]) and .schema_version == 1 and (.core_version | type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) and (.nodes | type == "array")' "$file" >/dev/null 2>&1 || {
-        xm_error '状态结构或 schema_version 不受支持。'; return 1;
+    jq -ne 'reduce inputs as $doc ({count:0,valid:false}; .count+=1 | if .count==1 then .valid=($doc | type == "object" and ((keys | sort) == ["core_version","nodes","schema_version"]) and .schema_version == 1 and (.core_version | type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) and (.nodes | type == "array" and length<=128 and all(type=="object"))) else .valid=false end) | .count==1 and .valid' "$file" >/dev/null 2>&1 || {
+        xm_error '配置须为单个 schema 1 JSON 对象，nodes 须为对象列表且最多 128 个节点。'; return 1;
     }
-    while IFS= read -r node; do protocol_validate_node "$node" "$mode" || return 1; done < <(jq -c '.nodes[]' "$file")
     jq -e '.nodes as $nodes | ["id","name","port","uuid","private_key","public_key","short_id","password","username","path"] | all(. as $key | ($nodes | map(.[$key]) | map(select(.!=null))) as $values | ($values|unique|length)==($values|length))' "$file" >/dev/null || {
         xm_error '节点 ID、名称、端口、凭据或路径重复。'; return 1;
     }
+    while IFS= read -r node; do protocol_validate_node "$node" "$mode" || return 1; done < <(jq -c '.nodes[]' "$file")
 }
 # Only edit/delete may preserve exact existing nodes with expired TLS.
 # Changed/new nodes remain strict; identity alone never grants an exception.

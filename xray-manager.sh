@@ -473,10 +473,11 @@ xm_backup() {
 xm_restore() {
     (($# == 1)) || { xm_usage_error 'import 需要现有配置的绝对路径。'; return 2; }
     [[ $1 == /* && $1 != */ ]] && xm_path_no_links "$1" || { xm_usage_error '导入须选择安全的绝对文件路径。'; return 2; }
-    xm_ready && xm_work_begin && state_validate "$1" || return 1
+    xm_ready && xm_work_begin || return 1
     local before node port already_owned count
     before=$(jq -c . "$XM_STATE") || return 1
-    cp -- "$1" "$XM_WORK_DIR/import.json" && chmod 0600 "$XM_WORK_DIR/import.json" && state_validate "$XM_WORK_DIR/import.json" || return 1
+    xm_import_snapshot "$1" "$XM_WORK_DIR/import.json" || return 1
+    state_validate "$XM_WORK_DIR/import.json" || return 1
     count=$(jq '.nodes|length' "$XM_WORK_DIR/import.json") || return 1
     xm_info "导入文件：$1；节点数：$count；替换全部当前节点，核心版本保持。"
     xm_unlock
@@ -626,7 +627,7 @@ xm_node_summary() {
     printf 'ID %s\n' "$(jq -r .id <<< "$node")" >&2
 }
 xm_menu_node() {
-    local action=$1 snapshot node index XM_CHOICE selected_id XM_SELECTED_NODE title
+    local action=$1 snapshot node XM_CHOICE selected_id XM_SELECTED_NODE title
     local -a nodes=()
     xm_menu_ready || return 1
     snapshot=$(jq -ec '.nodes' "$XM_STATE") || return 1
@@ -634,11 +635,12 @@ xm_menu_node() {
     case $action in view) title='节点管理（查看/修改）' ;; share) title='分享链接' ;; delete) title='删除节点' ;; *) return 2 ;; esac
     xm_ui_heading "$title"
     if ((${#nodes[@]} == 0)); then xm_info '尚无节点，请先添加节点。'; return 0; fi
-    for ((index=0; index<${#nodes[@]}; index++)); do
-        node=${nodes[index]}
-        printf '%s[%s]%s %s%s%s  ·  %s%s%s\n' "$XM_UI_BOLD" "$((index+1))" "$XM_UI_RESET" "$XM_UI_GREEN" "$(jq -r .name <<< "$node")" "$XM_UI_RESET" "$XM_UI_CYAN" "$(xm_node_type_label "$(jq -r .type <<< "$node")")" "$XM_UI_RESET" >&2
-        printf '    %s:%s  ·  ID %s\n\n' "$(jq -r .address <<< "$node")" "$(jq -r .port <<< "$node")" "$(jq -r .id <<< "$node")" >&2
-    done
+    local display number kind name address identity
+    display=$(printf '%s' "$snapshot" | jq '[.[]|{id,type,name,address,port}]' | xm_ui_format nodes "$(xm_terminal_width)" 2>/dev/null) || { xm_error '节点列表显示失败。'; return 1; }
+    while IFS=$'\t' read -r number kind name address identity; do
+        printf '%s[%s]%s %s%s%s  %s%s%s\n' "$XM_UI_BLUE" "$number" "$XM_UI_RESET" "$XM_UI_CYAN" "$kind" "$XM_UI_RESET" "$XM_UI_GREEN" "$name" "$XM_UI_RESET" >&2
+        printf '    %s\n  ID %s\n\n' "$address" "$identity" >&2
+    done <<< "$display"
     xm_ui_item 0 '返回'
     xm_info "输入 1..${#nodes[@]} 选择对应节点；0 返回，:q 取消。"
     while :; do
@@ -943,26 +945,13 @@ xm_menu_service() {
     xm_dispatch service "$action"
 }
 xm_menu_system_info() {
-    local width=$1 key value
+    local width=$1 raw formatted key value
+    raw=$(platform_system_info 2>/dev/null) || raw=
+    formatted=$(printf '%s\n' "$raw" | xm_ui_format overview "$width" 2>/dev/null) || formatted=
+    if [[ -z $formatted ]]; then formatted=$'OS\t未知\nHost\t未知\nKernel\t未知\nCPU\t未知\nMemory\t未知\nDisk\t未知'; fi
     while IFS=$'\t' read -r key value; do
-        case $key in OS|Host|Kernel|CPU|Memory|Disk) ;; *) continue ;; esac
-        value=$("${XM_PYTHON:-python3}" - "$value" "$width" <<'PYWIDTH'
-import sys,unicodedata
-budget=max(1,int(sys.argv[2])-10); text=sys.argv[1];out='';width=0
-for c in text:
-    if unicodedata.category(c)[0]=='C':continue
-    size=0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W','F') else 1
-    if width+size>budget:
-        while out and width>budget-1:
-            last=out[-1];out=out[:-1]
-            width-=0 if unicodedata.combining(last) else 2 if unicodedata.east_asian_width(last) in ('W','F') else 1
-        out+='…';break
-    out+=c;width+=size
-print(out or '未知')
-PYWIDTH
-) || value='未知'
         printf '  %s%-6s%s %s%s\n' "$XM_UI_BLUE" "$key" "$XM_UI_GREEN" "$value" "$XM_UI_RESET" >&2
-    done < <(platform_system_info 2>/dev/null)
+    done <<< "$formatted"
 }
 xm_menu_render() {
     local version='未安装' count=0 status='未运行' width status_color=$XM_UI_YELLOW

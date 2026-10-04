@@ -167,3 +167,31 @@ openssl ca -batch -selfsign -config "$scratch/ca.cnf" -keyfile "$scratch/renew-k
 jq --rawfile cert "$scratch/future.pem" '.nodes[].tls_cert=$cert' "$scratch/two-expired" > "$scratch/future-state"
 reject_import "$scratch/future-state"
 pass 'two expired nodes renew/delete sequentially; modified expired and expired/future imports remain strict'
+# Snapshot source descriptors are bounded, regular, exclusive and private.
+printf 'snapshot bytes\n' > "$scratch/snapshot-source"
+xm_import_snapshot "$scratch/snapshot-source" "$scratch/snapshot-target" || fail 'regular bounded snapshot'
+cmp "$scratch/snapshot-source" "$scratch/snapshot-target" || fail 'snapshot content'
+[[ $(stat -c %a "$scratch/snapshot-target") == 600 ]] || fail 'snapshot permissions'
+if xm_import_snapshot "$scratch/snapshot-source" "$scratch/snapshot-target" >/dev/null 2>&1; then fail 'snapshot overwrote existing target'; fi
+mkfifo "$scratch/import-fifo"
+for bad in "$scratch/import-fifo" "$scratch" "$scratch/no-source"; do
+    if xm_import_snapshot "$bad" "$scratch/rejected-snapshot" >/dev/null 2>&1; then fail 'nonregular snapshot source accepted'; fi
+    [[ ! -e $scratch/rejected-snapshot ]] || fail 'failed source left snapshot'
+done
+ln -s "$scratch/snapshot-source" "$scratch/import-link"
+if xm_import_snapshot "$scratch/import-link" "$scratch/rejected-snapshot" >/dev/null 2>&1; then fail 'symlink snapshot source accepted'; fi
+python3 - "$scratch/oversize-source" <<'PYOVERSIZE'
+import sys
+with open(sys.argv[1],'wb') as f:f.truncate(16777217)
+PYOVERSIZE
+if xm_import_snapshot "$scratch/oversize-source" "$scratch/rejected-snapshot" >/dev/null 2>&1; then fail 'oversize snapshot source accepted'; fi
+[[ ! -e $scratch/rejected-snapshot ]] || fail 'oversize snapshot retained partial file'
+if xm_import_snapshot "$scratch/snapshot-source" "$scratch/missing-directory/target" >/dev/null 2>&1; then fail 'snapshot write error accepted'; fi
+pass 'import snapshots are regular/exclusive/0600, bounded and clean failed copies'
+python3 - "$scratch/write-limit-source" <<'PYWRITELIMIT'
+import sys
+with open(sys.argv[1],'wb') as f:f.write(b'x'*4096)
+PYWRITELIMIT
+if (ulimit -f 1; xm_import_snapshot "$scratch/write-limit-source" "$scratch/write-limit-target") >/dev/null 2>&1; then fail 'partial-write failure accepted'; fi
+[[ ! -e $scratch/write-limit-target ]] || fail 'partial-write failure retained snapshot'
+pass 'bounded snapshot cleans a real file-size-limit write failure'

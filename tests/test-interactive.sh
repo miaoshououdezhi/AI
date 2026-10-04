@@ -182,7 +182,7 @@ mv "$TEST_ROOT/state.new" "$XM_STATE"
 printf '9\n2\n' > "$TEST_ROOT/input"
 xm_menu_node share < "$TEST_ROOT/input" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/select.log" || fail 'share numbered selection'
 jq -e '.[0]=="share" and .[1]=="second"' "$TEST_CALL" >/dev/null || fail 'share selection wrong ID'
-grep -q '\[1\].*First SS.*ss2022' "$TEST_ROOT/select.log" && grep -q '请输入 1..2' "$TEST_ROOT/select.log" || fail 'selection list/type/retry missing'
+grep -q '\[1\].*ss2022.*First SS' "$TEST_ROOT/select.log" && grep -q '请输入 1..2' "$TEST_ROOT/select.log" || fail 'selection list/type/retry missing'
 printf '1\n0\n' > "$TEST_ROOT/input"
 xm_menu_node view < "$TEST_ROOT/input" > "$TEST_ROOT/view.json" 2> "$TEST_ROOT/view.log" || fail 'view numbered selection'
 grep -q 'ID first' "$TEST_ROOT/view.log" || fail 'view wrong node'
@@ -308,3 +308,35 @@ pass 'schedule strict time, y confirmation, decline, and stopped-core skip'
     cmp "$TEST_ROOT/routes" "$TEST_ROOT/expected-routes" || fail 'main menu numbering mismatches handlers'
 ) || fail 'main menu dispatch fixture'
 pass 'main menu numbers 1..14 route to every intended handler'
+# Selection keeps full data/identity while only the display copy is cropped.
+xm_dispatch() { printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$TEST_CALL"; }
+state_empty v26.3.27 > "$XM_STATE"
+protocol_new shadowsocks wide-id '超长节点名称汉字宽字符测试🙂重复重复重复重复重复重复重复' 25001 2001:db8::1234 > "$TEST_ROOT/long-node" || fail 'long node fixture'
+jq --slurpfile node "$TEST_ROOT/long-node" '.nodes=[$node[0]]' "$XM_STATE" > "$TEST_ROOT/long-state"
+cp "$TEST_ROOT/long-state" "$XM_STATE"
+for TEST_WIDTH in 40 80; do
+    printf '1\n' > "$TEST_ROOT/long-input"
+    COLUMNS=$TEST_WIDTH xm_menu_node share < "$TEST_ROOT/long-input" >/dev/null 2> "$TEST_ROOT/long-list" || fail 'long node selection'
+    jq -e '.[0]=="share" and .[1]=="wide-id"' "$TEST_CALL" >/dev/null || fail 'display cropping changed selected identity'
+    python3 - "$TEST_ROOT/long-list" "$TEST_WIDTH" <<'PYLIST'
+import sys,unicodedata
+lines=open(sys.argv[1]).read().splitlines(); width=int(sys.argv[2]); listing=[]
+for line in lines:
+    if line.startswith('[1]') or line.startswith('    ') or line.startswith('  ID '):listing.append(line)
+for line in listing:
+    cells=sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ('W','F') else 1 for c in line)
+    assert cells<=width,(cells,line)
+assert any('[1] ss2022' in line for line in listing)
+assert any('[2001:db8::1234]:25001' in line for line in listing)
+assert '\x1b' not in '\n'.join(listing)
+PYLIST
+    [[ $? == 0 ]] || fail 'long node listing width or IPv6'
+    cmp "$XM_STATE" "$TEST_ROOT/long-state" || fail 'display changed actual state'
+done
+pass '40/80-column long-node lists preserve numbering/type/IPv6 and exact selected state'
+for TEST_DISPLAY_NAME in $'\u200b' $'\u0301'; do
+    jq --arg name "$TEST_DISPLAY_NAME" '.[0].name=$name' <<< "[$(cat "$TEST_ROOT/long-node")]" | xm_ui_format nodes 40 > "$TEST_ROOT/zero-width-list" || fail 'zero width display fixture'
+    IFS=$'\t' read -r TEST_NUMBER TEST_KIND TEST_NAME TEST_ADDRESS TEST_ID < "$TEST_ROOT/zero-width-list"
+    [[ $TEST_NUMBER == 1 && $TEST_KIND == ss2022 && $TEST_NAME == 未知 && $TEST_ADDRESS == '[2001:db8::1234]:25001' && $TEST_ID == wide-id ]] || fail 'zero-width name shifted display slots'
+done
+pass 'control-only and combining-only names retain visible slots and original identity'

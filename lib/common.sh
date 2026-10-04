@@ -166,3 +166,75 @@ xm_service_call() {
 xm_extra_service_call() {
     if [[ -n $XM_LOCK_FD ]]; then platform_extra_service "$@" {XM_LOCK_FD}>&-; else platform_extra_service "$@"; fi
 }
+
+# Batch display copies only. Never send node JSON or secrets in child argv.
+xm_ui_format() {
+    "${XM_PYTHON:-python3}" -c '
+import sys,json,unicodedata
+mode=sys.argv[1]; limit=max(1,min(10000,int(sys.argv[2])))
+def clean(v):return "".join(c for c in str(v) if unicodedata.category(c)[0]!="C")
+def cells(v):return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ("W","F") else 1 for c in v)
+def clip(v,budget):
+    v=clean(v);budget=max(0,budget)
+    if cells(v)<=budget:return v
+    if not budget:return ""
+    out="";width=0
+    for c in v:
+        size=0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ("W","F") else 1
+        if width+size>budget-1:break
+        out+=c;width+=size
+    return out+"…"
+if mode=="overview":
+    keys=("OS","Host","Kernel","CPU","Memory","Disk"); values={k:"未知" for k in keys}
+    for line in sys.stdin.read(65536).splitlines():
+        parts=line.split("\t",1)
+        if len(parts)==2 and parts[0] in values:values[parts[0]]=clean(parts[1]) or "未知"
+    for k in keys:print(k+"\t"+clip(values[k],max(1,limit-10)))
+elif mode=="nodes":
+    labels={"vless-reality":"reality","vless-xhttp":"xhttp","shadowsocks":"ss2022","vless-ws":"vless(ws)","socks5":"socks5","anytls":"anytls","hysteria2":"hy2","tuicv5":"tuicv5"}
+    for index,n in enumerate(json.load(sys.stdin),1):
+        kind=labels.get(n["type"],"unknown");prefix="[%s] %s  "%(index,kind)
+        name=clip(n["name"],limit-cells(prefix))
+        if not name or cells(name)==0:name=clip("未知",limit-cells(prefix))
+        addr=clean(n["address"]);port=str(n["port"])
+        suffix=("]:" if ":" in addr else ":")+port
+        opening="[" if ":" in addr else ""
+        address=opening+clip(addr,limit-4-cells(opening+suffix))+suffix
+        print("\t".join((str(index),kind,name,address,clip(n["id"],limit-5))))
+else:raise ValueError("unknown display mode")
+' "$1" "$2"
+}
+
+# Snapshot a regular import source once, bounded even if it grows or is swapped.
+xm_import_snapshot() {
+    "${XM_PYTHON:-python3}" - "$1" "$2" <<'PYSNAPSHOT'
+import os,stat,sys
+source,target=sys.argv[1:]; src=dst=None; created=False; limit=16777216
+try:
+    src=os.open(source,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW)
+    if not stat.S_ISREG(os.fstat(src).st_mode):raise ValueError("导入源必须是普通文件")
+    dst=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);created=True
+    os.fchmod(dst,0o600); total=0
+    while total<=limit:
+        data=os.read(src,min(65536,limit+1-total))
+        if not data:break
+        total+=len(data)
+        if total>limit:raise ValueError("配置文件超过 16 MiB")
+        view=memoryview(data)
+        while view:
+            written=os.write(dst,view)
+            if written<=0:raise OSError("快照写入失败")
+            view=view[written:]
+except (OSError,ValueError) as e:
+    color=os.environ.get("XM_UI_RED","") if sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM","dumb")!="dumb" else ""
+    if color!="\x1b[38;2;255;0;0m":color=""
+    print(color+"[错误] 导入快照失败："+str(e)+("\x1b[0m" if color else ""),file=sys.stderr)
+    if created:
+        try:os.unlink(target)
+        except OSError:pass
+    sys.exit(1)
+finally:
+    if src is not None:os.close(src)
+    if dst is not None:os.close(dst)
+PYSNAPSHOT
+}

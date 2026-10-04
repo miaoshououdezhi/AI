@@ -50,3 +50,28 @@ print('PASS real PTY bright labels, NO_COLOR/dumb and single-key return')
 PY
 [[ $? == 0 ]] || fail 'PTY UI checks'
 printf 'PASS labels stderr-only, redirected pause preserves command input\n'
+# One batch formatter handles all six fields and fallback always stays present.
+(
+    # shellcheck disable=SC1090
+    source <(sed -n '/^xm_menu_system_info() {/,/^}/p' "$repo/xray-manager.sh")
+    cat > "$scratch/format-python" <<'PYWRAPPER'
+#!/bin/sh
+printf 'start\n' >> "$XM_FORMAT_COUNT"
+exec python3 "$@"
+PYWRAPPER
+    chmod 0700 "$scratch/format-python"
+    export XM_FORMAT_COUNT="$scratch/count" XM_PYTHON="$scratch/format-python"
+    platform_system_info() { printf 'OS\tOS\nHost\tHost\nKernel\tKernel\nCPU\tCPU\nMemory\tMemory\nDisk\tDisk\n'; }
+    xm_menu_system_info 40 2> "$scratch/batch"
+    [[ $(wc -l < "$scratch/count") == 1 && $(wc -l < "$scratch/batch") == 6 ]] || fail 'overview not formatted in one batch'
+    platform_system_info() { printf 'Host\tpartial\n'; return 1; }
+    xm_menu_system_info 40 2> "$scratch/provider-failed"
+    [[ $(grep -c '未知' "$scratch/provider-failed") == 6 ]] || fail 'provider failure lost unknown rows'
+    platform_system_info() { printf 'Host\tpartial\n'; }
+    xm_menu_system_info 40 2> "$scratch/partial"
+    [[ $(grep -c '未知' "$scratch/partial") == 5 ]] || fail 'partial provider lost default rows'
+    XM_PYTHON=/nonexistent/formatter
+    xm_menu_system_info 40 2> "$scratch/formatter-failed"
+    [[ $(grep -c '未知' "$scratch/formatter-failed") == 6 ]] || fail 'formatter failure lost unknown rows'
+) || fail 'batch overview fallback'
+printf 'PASS batch overview uses one formatter and always renders six fields on failure\n'

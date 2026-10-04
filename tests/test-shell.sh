@@ -221,3 +221,28 @@ pass 'uninstall refuses ancestor symlink before service changes or deletion'
     xm_work_end; xm_unlock
 ) || fail 'retirement migration regression block failed'
 pass 'retirement validates supported nodes, preserves private original backup, rolls back health failure and refuses unknown type'
+# State boundaries are checked before expensive authoritative protocol work.
+(
+    protocol_validate_node() { printf 'called\n' >> "$ROOT/validation-calls"; }
+    state_empty v26.3.27 > "$ROOT/boundary-state"
+    cat "$ROOT/boundary-state" "$ROOT/boundary-state" > "$ROOT/multi-doc"
+    : > "$ROOT/validation-calls"
+    if state_validate "$ROOT/multi-doc"; then fail 'multiple JSON documents accepted'; fi
+    : > "$ROOT/empty-doc"
+    if state_validate "$ROOT/empty-doc"; then fail 'empty JSON input accepted'; fi
+    { cat "$ROOT/boundary-state"; printf '0\n'; } > "$ROOT/scalar-tail"
+    if state_validate "$ROOT/scalar-tail"; then fail 'scalar trailing document accepted'; fi
+    { cat "$ROOT/boundary-state"; printf '{bad\n'; } > "$ROOT/bad-tail"
+    if state_validate "$ROOT/bad-tail"; then fail 'malformed trailing JSON accepted'; fi
+    jq '.nodes=[null]' "$ROOT/boundary-state" > "$ROOT/invalid-object"
+    if state_validate "$ROOT/invalid-object"; then fail 'non-object node accepted'; fi
+    jq '.nodes=[range(129)|{id:("n"+tostring),port:(1000+.)}]' "$ROOT/boundary-state" > "$ROOT/too-many"
+    if state_validate "$ROOT/too-many"; then fail '129 nodes accepted'; fi
+    jq '.nodes=[{id:"same",port:1000},{id:"same",port:1001}]' "$ROOT/boundary-state" > "$ROOT/duplicate"
+    if state_validate "$ROOT/duplicate"; then fail 'duplicate ID accepted'; fi
+    [[ ! -s $ROOT/validation-calls ]] || fail 'cheaply invalid states invoked expensive validation'
+    jq '.nodes=[range(128)|{id:("n"+tostring),port:(1000+.)}]' "$ROOT/boundary-state" > "$ROOT/max-nodes"
+    state_validate "$ROOT/max-nodes" maintenance || fail '128 valid structures rejected'
+    [[ $(wc -l < "$ROOT/validation-calls") == 128 ]] || fail 'normal nodes lost complete protocol validation'
+) || fail 'early state boundary fixture'
+pass 'single document/object/128-node/duplicate checks precede complete protocol validation'
