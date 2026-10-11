@@ -11,11 +11,17 @@ export XM_ROOT=$tmp/root
 platform_prepare
 mkdir -p "$XM_HOME/assets" "$XM_HOME/lib"
 cp "$repo/assets/xy" "$XM_HOME/assets/xy"
+for name in xray-manager-system-update.service xray-manager-system-update.timer xray-manager-system-update.openrc xray-manager-system-update.py; do
+    cp "$repo/assets/$name" "$XM_HOME/assets/$name"
+done
+printf '# xray-manager-owned:1\nweekly\n04:00\n' > "$XM_ETC/system-update-schedule"
 printf 'core\n' > "$XM_BIN"
 printf '{"nodes":[]}\n' > "$XM_ETC/state.json"
 printf 'log\n' > "$XM_LOG/console.log"
 printf 'native failure\n' > "$XM_LOG/last-error.log"
 printf 'native extra failure\n' > "$XM_LOG/last-extra-error.log"
+printf 'scheduled update output\n' > "$XM_LOG/system-update-schedule.log"
+printf 'rotated output\n' > "$XM_LOG/system-update-schedule.log.1.gz"
 printf 'external export\n' > "$tmp/export.json"
 platform_shortcut_install
 platform_clean_uninstall_preflight
@@ -27,6 +33,10 @@ ln -s "$tmp/export.json" "$XM_LOG/console.log.1"
 reject platform_clean_uninstall_preflight
 [[ $(cat "$tmp/export.json") == 'external export' ]] || fail 'external export changed'
 rm "$XM_LOG/console.log.1"
+ln -s "$tmp/export.json" "$XM_LOG/system-update-schedule.log.2"
+reject platform_clean_uninstall_preflight
+[[ $(cat "$tmp/export.json") == 'external export' ]] || fail 'new schedule log symlink changed export'
+rm "$XM_LOG/system-update-schedule.log.2"
 platform_clean_uninstall
 for p in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" "$XM_ROOT/usr/local/bin/xy"; do [[ ! -e $p ]] || fail "retained own path $p"; done
 [[ -f $tmp/export.json && -d $XM_ROOT/usr/local/bin ]] || fail 'external export/standard directory preservation'

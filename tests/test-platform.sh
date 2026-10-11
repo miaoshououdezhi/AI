@@ -58,8 +58,29 @@ run_system_update_stub() (
     # Permit the fixture root only here, after testing the production guard.
     # Pin the inherited frontend so CI runner environment cannot change assertions.
     DEBIAN_FRONTEND=interactive
+    if [[ ${TEST_MANAGER_FD:-0} == 1 ]]; then
+        exec 197> "$TEST_ROOT/manager-fd"
+        XM_LOCK_FD=197
+    fi
     _platform_real() { printf 'real-check\n' >> "$TEST_ROOT/update-gates"; return "${TEST_REAL_STATUS:-0}"; }
+    _platform_system_update_lock_path() { printf '%s\n' "$TEST_ROOT/system-update.lock"; }
+    _platform_system_update_lock_mode() {
+        if command stat -c %a "$1" >/dev/null 2>&1; then command stat -c %a "$1";
+        else command stat -f %Lp "$1"; fi
+    }
+    flock() {
+        [[ $* == '-n 198' && -e /dev/fd/198 ]] || return 97
+        [[ ${TEST_LOCK_BUSY:-0} != 1 && ${TEST_LOCK_HELD:-0} != 1 ]] || return 1
+        TEST_LOCK_HELD=1
+        printf 'flock acquired\n' >> "$TEST_ROOT/update-lock-events"
+    }
     apt-get() {
+        [[ ! -e /dev/fd/198 ]] || return 98
+        [[ ${TEST_MANAGER_FD:-0} != 1 || ! -e /dev/fd/197 ]] || return 95
+        if [[ ${TEST_REENTER:-0} == 1 && $* == '--error-on=any update' ]]; then
+            if platform_system_update > "$TEST_ROOT/nested.stdout" 2> "$TEST_ROOT/nested.stderr"; then return 96; fi
+            grep -q '已有系统软件包更新正在执行' "$TEST_ROOT/nested.stderr" || return 96
+        fi
         printf 'apt-get:%s:frontend=%s\n' "$*" "${DEBIAN_FRONTEND:-}" >> "$TEST_ROOT/update-commands"
         printf 'apt stdout: %s\n' "$*"
         printf 'apt stderr: %s\n' "$*" >&2
@@ -72,6 +93,8 @@ run_system_update_stub() (
         esac
     }
     apk() {
+        [[ ! -e /dev/fd/198 ]] || return 98
+        [[ ${TEST_MANAGER_FD:-0} != 1 || ! -e /dev/fd/197 ]] || return 95
         printf 'apk:%s\n' "$*" >> "$TEST_ROOT/update-commands"
         printf 'apk stdout: %s\n' "$*"
         printf 'apk stderr: %s\n' "$*" >&2
@@ -86,6 +109,7 @@ for fixture in 'debian 12' 'debian 13' 'alpine 3.23.4' 'alpine 3.24.0'; do
     : > "$TEST_ROOT/update-gates"
     TEST_FAIL_STAGE='' run_system_update_stub || fail "$id system update failed with package stubs"
     [[ $(cat "$TEST_ROOT/update-gates") == real-check ]] || fail "$id did not run real/root guard first"
+    [[ $(cat "$TEST_ROOT/update-lock-events") == *'flock acquired'* ]] || fail "$id did not acquire update lock"
     if [[ $id == debian ]]; then
         [[ $(cat "$TEST_ROOT/update-commands") == $'apt-get:--error-on=any update:frontend=interactive\napt-get:upgrade --with-new-pkgs -y:frontend=noninteractive' ]] || fail "Debian update command order or flags: $(cat "$TEST_ROOT/update-commands")"
         grep -q 'apt stdout: upgrade --with-new-pkgs -y' "$TEST_ROOT/update.stdout" || fail 'Debian stdout hidden'
@@ -118,6 +142,79 @@ for fixture in 'debian 12' 'debian 13' 'alpine 3.23.4' 'alpine 3.24.0'; do
         grep -q 'APT 软件包索引更新失败（退出码 100）' "$TEST_ROOT/update.stderr" || fail 'Debian strict index failure stage hidden'
     fi
 done
+printf 'ID=debian\nVERSION_ID=12\n' > "$XM_ROOT/etc/os-release"
+: > "$TEST_ROOT/update-commands"
+if TEST_FAIL_STAGE='' TEST_LOCK_BUSY=1 run_system_update_stub; then fail 'busy update lock returned success'; fi
+[[ ! -s $TEST_ROOT/update-commands ]] || fail 'busy update lock reached a package manager'
+: > "$TEST_ROOT/update-commands"
+TEST_FAIL_STAGE='' TEST_REENTER=1 run_system_update_stub || fail 'outer update failed after nested lock rejection'
+[[ $(wc -l < "$TEST_ROOT/update-commands") -eq 2 ]] || fail 'nested update reached a package manager'
+: > "$TEST_ROOT/update-commands"
+# Exercise the actual flock binary when available. All files and package
+# commands remain in this fixture; no host package manager can be invoked.
+run_system_update_real_flock() (
+    _platform_real() { return 0; }
+    _platform_system_update_lock_path() { printf '%s\n' "$TEST_ROOT/real-system-update.lock"; }
+    _platform_system_update_lock_mode() {
+        if command stat -c %a "$1" >/dev/null 2>&1; then command stat -c %a "$1";
+        else command stat -f %Lp "$1"; fi
+    }
+    exec 197> "$TEST_ROOT/real-manager-fd"
+    XM_LOCK_FD=197
+    apt-get() {
+        [[ ! -e /proc/self/fd/198 && ! -e /proc/self/fd/197 ]] || return 94
+        printf '%s\n' "$*" >> "$TEST_ROOT/real-flock-package-calls"
+        [[ ${TEST_REAL_FLOCK_NESTED:-0} != 1 ]] || return 95
+        if [[ $* == '--error-on=any update' && ${TEST_REAL_FLOCK_REENTER:-0} == 1 ]]; then
+            if TEST_REAL_FLOCK_NESTED=1 platform_system_update > "$TEST_ROOT/real-flock-nested.stdout" 2> "$TEST_ROOT/real-flock-nested.stderr"; then return 96; fi
+            grep -q '已有系统软件包更新正在执行' "$TEST_ROOT/real-flock-nested.stderr" || return 97
+        fi
+        if [[ $* == 'upgrade --with-new-pkgs -y' ]]; then
+            # A fresh file description must still be unable to take the lock
+            # after the first package command has returned.
+            exec 199>> "$TEST_ROOT/real-system-update.lock"
+            if command flock -n 199; then exec 199>&-; return 98; fi
+            exec 199>&-
+            printf 'held-through-upgrade\n' >> "$TEST_ROOT/real-flock-events"
+        fi
+    }
+    apk() { return 99; }
+    platform_system_update
+)
+if command -v flock >/dev/null 2>&1 && (( BASH_VERSINFO[0] >= 4 )); then
+    : > "$TEST_ROOT/real-flock-package-calls"
+    : > "$TEST_ROOT/real-flock-events"
+    TEST_REAL_FLOCK_REENTER=1 run_system_update_real_flock || fail 'real flock rejected outer system update'
+    [[ $(cat "$TEST_ROOT/real-flock-package-calls") == $'--error-on=any update\nupgrade --with-new-pkgs -y' ]] || fail 'nested real-flock call reached a package manager'
+    [[ $(cat "$TEST_ROOT/real-flock-events") == held-through-upgrade ]] || fail 'real flock was released before upgrade completed'
+    : > "$TEST_ROOT/real-flock-package-calls"
+    : > "$TEST_ROOT/real-flock-events"
+    TEST_REAL_FLOCK_REENTER=0 run_system_update_real_flock || fail 'real flock was not released for a later update'
+    [[ $(cat "$TEST_ROOT/real-flock-package-calls") == $'--error-on=any update\nupgrade --with-new-pkgs -y' ]] || fail 'second real-flock update order'
+    [[ $(cat "$TEST_ROOT/real-flock-events") == held-through-upgrade ]] || fail 'second real-flock update lost its lock'
+    printf 'PASS: real flock excludes nested update, retains parent lock and releases for next call (package stubs)\n'
+else
+    printf 'SKIP: real flock integration requires flock and Bash 4+\n'
+fi
+if ((BASH_VERSINFO[0] >= 4)); then
+    TEST_FAIL_STAGE='' TEST_MANAGER_FD=1 run_system_update_stub || fail 'manager lock fd was inherited by package stub'
+    : > "$TEST_ROOT/update-commands"
+fi
+chmod 0777 "$TEST_ROOT"
+if TEST_FAIL_STAGE='' run_system_update_stub; then fail 'writable update lock directory returned success'; fi
+chmod 0700 "$TEST_ROOT"
+[[ ! -s $TEST_ROOT/update-commands ]] || fail 'writable lock directory reached a package manager'
+printf 'foreign preserved\n' > "$TEST_ROOT/foreign-lock-target"
+rm -f "$TEST_ROOT/system-update.lock"
+ln -s "$TEST_ROOT/foreign-lock-target" "$TEST_ROOT/system-update.lock"
+if TEST_FAIL_STAGE='' run_system_update_stub; then fail 'symlink update lock returned success'; fi
+[[ $(cat "$TEST_ROOT/foreign-lock-target") == 'foreign preserved' ]] || fail 'symlink update lock target changed'
+rm "$TEST_ROOT/system-update.lock"
+printf 'lock\n' > "$TEST_ROOT/system-update.lock"
+chmod 0666 "$TEST_ROOT/system-update.lock"
+if TEST_FAIL_STAGE='' run_system_update_stub; then fail 'writable update lock returned success'; fi
+chmod 0600 "$TEST_ROOT/system-update.lock"
+[[ ! -s $TEST_ROOT/update-commands ]] || fail 'unsafe update lock reached a package manager'
 printf 'ID=debian\nVERSION_ID=12\n' > "$XM_ROOT/etc/os-release"
 : > "$TEST_ROOT/update-commands"
 if TEST_FAIL_STAGE='' TEST_REAL_STATUS=7 run_system_update_stub; then fail 'root guard failure returned success'; else result=$?; fi

@@ -83,6 +83,9 @@ platform_restart_schedule set 04:00
 grep -q 'OnCalendar=\*-\*-\* 04:00:00' "$test_dir/units/xray-manager-restart.timer" || fail 'calendar template'
 [[ $(platform_restart_schedule status) == enabled$'\t'04:00$'\t'* ]] || fail 'status format'
 cp "$XM_ETC/restart-schedule" "$test_dir/before"
+printf 'trailing-without-newline' >> "$XM_ETC/restart-schedule"
+reject _platform_schedule_read_time
+cp "$test_dir/before" "$XM_ETC/restart-schedule"
 touch "$test_dir/fail-start"
 reject platform_restart_schedule set 05:00
 cmp "$XM_ETC/restart-schedule" "$test_dir/before" || { cat "$test_dir/err" >&2; fail 'failure state rollback'; }

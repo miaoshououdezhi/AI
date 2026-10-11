@@ -94,7 +94,9 @@ sh install.sh v26.3.27
 [0]  退出脚本
 ```
 
-`[5] 系统更新` 或 `xy update-system` 会先识别支持的 Debian/Alpine 版本，并显示拟执行的命令。Debian 运行 `apt-get --error-on=any update`，全部仓库索引无错误后运行 `DEBIAN_FRONTEND=noninteractive apt-get upgrade --with-new-pkgs -y`；Alpine 运行 `apk update` 后运行 `apk upgrade`。仅升级当前配置仓库中的软件包，不切换发行版分支、改写软件仓库或单独升级 Xray 核心。确认时输入 `y`/`yes`（不区分大小写）；非交互调用需显式使用 `xy --yes update-system`。软件包升级可能重启服务，也可能需要稍后重启机器；脚本不会自动重启机器，系统包变更无法通用回滚。`XM_ROOT` 隔离模式拒绝系统包更新。
+`[5] 系统更新` 打开专用菜单，可立即更新，或选择每天、每周一、每月 1 日按本机时区自动更新，也可选择“不定时（仅手动）”。计划默认关闭；设置时间为 `HH:MM`（默认 `04:00`），启用前必须确认，不补跑错过的执行。Debian 使用项目专属 systemd timer，Alpine 使用项目专属 OpenRC 调度服务；完全卸载会移除计划和项目专属资源。
+
+立即更新也可运行 `xy update-system`。脚本先识别支持的 Debian/Alpine 版本，并显示拟执行的命令。Debian 运行 `apt-get --error-on=any update`，全部仓库索引无错误后运行 `DEBIAN_FRONTEND=noninteractive apt-get upgrade --with-new-pkgs -y`；Alpine 运行 `apk update` 后运行 `apk upgrade`。仅升级当前配置仓库中的软件包，不切换发行版分支、改写软件仓库或单独升级 Xray 核心。立即更新及启用/禁用计划均要求输入 `y`/`yes`（不区分大小写）；非交互调用需显式使用 `--yes`。软件包升级可能重启服务，也可能需要稍后重启机器；脚本不会自动重启机器，系统包变更无法通用回滚。`XM_ROOT` 隔离模式拒绝系统包更新及计划变更。
 
 系统概览只读取本机信息，标签蓝色、值绿色；CPU显示可用核数，内存优先采用有效 cgroup v2 限额及当前使用量，磁盘显示根文件系统已用/总量。缺失项显示“未知”，窄终端截取长值；读取不会安装依赖、发起网络请求或更改服务。概览一次采集、一次批量裁剪，采集或格式化失败仍显示六项“未知”。
 
@@ -242,6 +244,12 @@ xy service restart
 xy schedule status
 xy --yes schedule set 04:00
 xy --yes schedule disable
+xy system-update-schedule status
+xy --yes system-update-schedule set daily 04:00   # 每天
+xy --yes system-update-schedule set weekly 04:00  # 每周一
+xy --yes system-update-schedule set monthly 04:00 # 每月 1 日
+xy --yes system-update-schedule disable           # 不定时，仅手动
+xy --yes update-system                             # 立即更新
 xy logs 80
 xy diagnose
 
@@ -293,6 +301,7 @@ xy --yes uninstall
 ```sh
 for file in xray-manager.sh lib/*.sh tests/*.sh; do bash -n "$file"; done
 sh -n install.sh
+for file in assets/*.openrc; do sh -n "$file"; done
 shellcheck -x -S warning xray-manager.sh install.sh lib/*.sh tests/*.sh
 bash tests/test-shell.sh
 bash tests/test-interactive.sh
@@ -302,10 +311,11 @@ bash tests/test-outbound-protocol.sh
 bash tests/test-migration.sh
 bash tests/test-ui.sh
 bash tests/test-platform.sh
+bash tests/test-system-update-schedule.sh
 bash tests/test-protocol.sh
 ```
 
-`test-interactive.sh` 使用真实协议校验、模拟外部查询及真实 PTY，覆盖回车随机默认值、XHTTP、字段重提示、编号选择及列表变化保护、查询失败手动回退、取消/EOF、大小写确认、定时重启输入与停止核心跳过、升级二次确认以及颜色降级。
+`test-interactive.sh` 使用真实协议校验、模拟外部查询及真实 PTY，覆盖回车随机默认值、XHTTP、字段重提示、编号选择及列表变化保护、查询失败手动回退、取消/EOF、大小写确认、定时重启输入与停止核心跳过、系统更新计划菜单与互斥、升级二次确认以及颜色降级。`test-system-update-schedule.sh` 使用隔离状态和模拟服务验证计划周期、配置严格解析、启停/失败恢复，不会升级宿主软件包。CI 另用 `systemd-analyze` 验证三种日历表达式和生成的 systemd unit，不启动服务。
 
 `test-edit.sh` 使用真实协议验证与状态事务、模拟核心执行和服务，覆盖三协议修改、成对密钥、字段/冲突拒绝、确认取消、快照并发和回退；它不冒充真实核心原生验证，真实核心校验另行执行。
 

@@ -10,15 +10,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq shellcheck curl unzip openssl python3 util-linux
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck curl unzip openssl python3 util-linux systemd
       - name: Syntax and shellcheck
         run: |
           for file in xray-manager.sh lib/*.sh tests/*.sh; do bash -n "$file"; done
           sh -n install.sh
           sh -n deploy.sh
           sh -n assets/xy
+          for file in assets/*.openrc; do sh -n "$file"; done
           python3 -c 'import ast,pathlib; [ast.parse(p.read_text()) for p in pathlib.Path("assets").glob("*.py")]'
           shellcheck -x -S warning xray-manager.sh install.sh deploy.sh lib/*.sh tests/*.sh
+      - name: System update schedule unit and calendar verification
+        run: |
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf -- "$verify_dir"' EXIT
+          cp assets/xray-manager-system-update.service "$verify_dir/"
+          for calendar in '*-*-* 04:00:00' 'Mon *-*-* 04:00:00' '*-*-01 04:00:00'; do
+            sed "s/@CALENDAR@/$calendar/" assets/xray-manager-system-update.timer > "$verify_dir/xray-manager-system-update.timer"
+            systemd-analyze verify "$verify_dir/xray-manager-system-update.service" "$verify_dir/xray-manager-system-update.timer"
+            systemd-analyze calendar --iterations=1 "$calendar" > /dev/null
+          done
       - name: Shell transactions
         run: bash tests/test-shell.sh
       - name: Interactive defaults, validation and terminal styles
@@ -45,6 +56,8 @@ jobs:
         run: bash tests/test-platform.sh
       - name: Restart schedule transactions and daemon
         run: bash tests/test-schedule.sh
+      - name: System package update schedule transactions and daemon
+        run: bash tests/test-system-update-schedule.sh
       - name: Global xy shortcut ownership
         run: bash tests/test-shortcut.sh
       - name: Protocol tests
