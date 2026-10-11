@@ -31,6 +31,13 @@ jobs:
           source=source.replace(needle," human('信息','DIAGNOSTIC candidates='+str(sorted(candidates))+' removed='+str(sorted(removed))+' unexpected='+str(sorted(removed-candidates)))\n"+needle)
           Path('/tmp/diagnostic-platform.sh').write_text(source)
           PY
+          python3 - <<'PY'
+          import json,subprocess
+          j=json.load(open('/etc/xray-manager/dependency-ledger.json'))
+          names=sorted(set(j['added'])-set(j['baseline'])-{'iproute2-minimal','libelf','libmnl','iproute2'})
+          print('DIAGNOSTIC world-anchor request',names,flush=True)
+          subprocess.run(['apk','del','--simulate','--']+names,check=True)
+          PY
           bash -c 'source /tmp/diagnostic-platform.sh; XM_OS=alpine; _platform_dependency_plan /etc/xray-manager/dependency-ledger.json' || result=$?
           printf 'DIAGNOSTIC read-only plan exit=%s\n' "${result:-0}"
           ALPINE
