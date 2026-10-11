@@ -1348,16 +1348,20 @@ _platform_dependency_record() {
     _platform_python - "$tmp/before" "$tmp/after" "$target" "$tmp/new" <<'PY'
 import json,pathlib,re,sys
 before,after,target,out=map(pathlib.Path,sys.argv[1:])
+def require(condition,message):
+ if not condition:raise ValueError(message)
 try:
  b=json.loads(before.read_text());a=json.loads(after.read_text())
+ require(isinstance(b,dict) and isinstance(a,dict),'invalid package inventory')
  for inv in (b,a):
-  assert set(inv)=={'os','packages'} and inv['os']==a['os'] and isinstance(inv['packages'],list)
-  assert all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in inv['packages'])
+  require(set(inv)=={'os','packages'} and inv['os']==a['os'] and isinstance(inv['packages'],list),'invalid package inventory')
+  require(all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in inv['packages']),'invalid package name')
  added=set(a['packages'])-set(b['packages'])
  if target.exists():
-  old=json.loads(target.read_text());assert old.get('owner')=='xray-manager:1' and old.get('os')==a['os']
-  assert isinstance(old.get('baseline'),list) and isinstance(old.get('added'),list)
-  assert all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in old['baseline']+old['added'])
+  old=json.loads(target.read_text())
+  require(isinstance(old,dict) and old.get('owner')=='xray-manager:1' and old.get('os')==a['os'],'foreign dependency ledger')
+  require(isinstance(old.get('baseline'),list) and isinstance(old.get('added'),list),'invalid dependency ledger lists')
+  require(all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in old['baseline']+old['added']),'invalid dependency ledger name')
   # Never adopt a dependency that was present before this invocation but was
   # not already attributed to our installer (legacy/externally added package).
   baseline=set(old['baseline']) | (set(b['packages'])-set(old['added']))
@@ -1372,18 +1376,22 @@ PY
     rm -rf -- "$tmp"
     return "$result"
 }
-# Emit only removable, newly-added packages; preserve packages with external
-# installed reverse dependencies. Simulation must not remove anything outside it.
+# Emit only package-manager requests with a verified removal closure; preserve
+# baseline, protected and externally required packages. Alpine apk del may
+# remove orphan dependencies even when they are omitted from its argv.
 _platform_dependency_plan() {
     local ledger=$1
     _platform_no_symlink "$ledger" && [[ -f $ledger && $(wc -c < "$ledger") -le 1048576 ]] || return 1
     _platform_python - "$ledger" "${XM_OS:-}" <<'PY'
 import json,pathlib,re,subprocess,sys
+def require(condition,message):
+ if not condition:raise ValueError(message)
 try:
  j=json.loads(pathlib.Path(sys.argv[1]).read_text());osname=sys.argv[2]
- assert j.get('owner')=='xray-manager:1' and j.get('os')==osname
- assert isinstance(j.get('baseline'),list) and isinstance(j.get('added'),list)
- assert all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in j['baseline']+j['added'])
+ require(osname in ('debian','alpine'),'unsupported package system')
+ require(isinstance(j,dict) and j.get('owner')=='xray-manager:1' and j.get('os')==osname,'foreign package ledger')
+ require(isinstance(j.get('baseline'),list) and isinstance(j.get('added'),list),'invalid package ledger lists')
+ require(all(isinstance(p,str) and re.fullmatch('[a-z0-9][a-z0-9+._:-]{0,127}',p) for p in j['baseline']+j['added']),'invalid package ledger name')
  if osname=='debian':
   inventory=subprocess.check_output(['dpkg-query','-W','-f=${binary:Package}\t${db:Status-Status}\n'],text=True)
   installed={l.split('\t')[0] for l in inventory.splitlines() if l.endswith('\tinstalled')}
@@ -1420,21 +1428,41 @@ try:
      else:deps.update(matches)
    if deps-candidates:
     candidates.remove(p);changed=True
- retained=(set(j['added']) & installed)-candidates
- if retained:human('警告', '保留系统/共享/登录Shell依赖：'+', '.join(sorted(retained)))
- if not candidates:sys.exit(0)
- names=sorted(candidates)
- argv=['apt-get','--simulate','--no-auto-remove','purge','--']+names if osname=='debian' else ['apk','del','--simulate','--']+names
- text=subprocess.check_output(argv,stderr=subprocess.STDOUT,text=True)
- removed=set()
- for line in text.splitlines():
-  assert not re.match(r'^(?:Inst|Conf)\s',line) and not re.search(r'(?:Installing|Upgrading|Downgrading)\s',line),'simulation would alter unrelated package state'
-  match=re.match(r'^(?:Remv|Purg)\s+(\S+)',line) if osname=='debian' else re.search(r'(?:Purging|Removing)\s+(\S+)',line)
-  if match:
-   token=match[1]; matches={p for p in installed if p==token or p.split(':')[0]==token}
-   assert len(matches)==1,'ambiguous removal';removed.update(matches)
- assert removed and removed<=candidates,'package simulation would exceed owned additions'
- for p in sorted(removed):print(p)
+ def simulate(names):
+  argv=['apt-get','--simulate','--no-auto-remove','purge','--']+names if osname=='debian' else ['apk','del','--simulate','--']+names
+  text=subprocess.check_output(argv,stderr=subprocess.STDOUT,text=True)
+  removed=set()
+  for line in text.splitlines():
+   require(not re.match(r'^(?:Inst|Conf)\s',line) and not re.search(r'(?:Installing|Upgrading|Downgrading)\s',line),'simulation would alter unrelated package state')
+   match=re.match(r'^(?:Remv|Purg)\s+(\S+)',line) if osname=='debian' else re.search(r'(?:Purging|Removing)\s+(\S+)',line)
+   if osname=='alpine' and re.match(r'^\s*\(\s*\d+/\d+\)\s+',line):
+    require(bool(match),'unrecognized package simulation action')
+   if match:
+    token=match[1];matches={p for p in installed if p==token or p.split(':')[0]==token}
+    require(len(matches)==1,'ambiguous removal');removed.update(matches)
+  return removed
+ if osname=='debian':
+  names=sorted(candidates);removed=simulate(names) if names else set()
+  require(not names or (bool(removed) and removed<=candidates),'package simulation would exceed owned additions')
+  retained=(set(j['added']) & installed)-removed
+  if retained:human('警告', '保留系统/共享/登录Shell依赖：'+', '.join(sorted(retained)))
+  for p in names:print(p)
+ else:
+  # Build the exact apk del argv incrementally. A safe request may leave some
+  # requested packages installed because another world entry still needs them.
+  names=[];removed=set()
+  for p in sorted(candidates):
+   trial=names+[p];trial_removed=simulate(trial)
+   if trial_removed<=candidates:names=trial;removed=trial_removed
+  if names:
+   final_removed=simulate(names)
+   require(final_removed==removed,'package simulation changed during planning')
+   removed=final_removed
+   require(removed<=candidates,'package simulation would exceed owned additions')
+  retained=(set(j['added']) & installed)-removed
+  if retained:human('警告', '保留系统/共享/登录Shell依赖：'+', '.join(sorted(retained)))
+  if removed:
+   for p in names:print(p)
 except Exception as e:human('错误', '依赖卸载计划无法安全确认：'+str(e));sys.exit(1)
 PY
 }
@@ -1639,11 +1667,12 @@ platform_extra_discard_new() {
         [[ -f $XM_EXTRA_BIN && -f $XM_ETC/extra-core.sha256 ]] || return 1
         _platform_python - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
 import hashlib,pathlib,re,sys
-b,p=map(pathlib.Path,sys.argv[1:]);assert p.stat().st_size<=128
+b,p=map(pathlib.Path,sys.argv[1:])
+if p.stat().st_size>128:raise ValueError('oversized auxiliary digest')
 h=p.read_text().strip();actual=hashlib.sha256()
 with b.open('rb') as f:
  for data in iter(lambda:f.read(1024*1024),b''):actual.update(data)
-assert re.fullmatch('[0-9a-f]{64}',h) and actual.hexdigest()==h
+if not (re.fullmatch('[0-9a-f]{64}',h) and actual.hexdigest()==h):raise ValueError('auxiliary digest mismatch')
 PY
         [[ $? == 0 ]] || return 1
         rm -f -- "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" || result=1

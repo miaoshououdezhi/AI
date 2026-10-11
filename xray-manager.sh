@@ -1053,8 +1053,8 @@ xm_menu_add() {
     xm_menu_address XM_ADDRESS || return 2
     case $type in
         vless-reality)
-            xm_menu_draft "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" www.cloudflare.com www.cloudflare.com:443 || return 1
-            xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'www.cloudflare.com' || return 2
+            xm_menu_draft "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" genshin.hoyoverse.com genshin.hoyoverse.com:443 || return 1
+            xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'genshin.hoyoverse.com' || return 2
             XM_TARGET="${XM_SNI}:443"
             xm_menu_validate_field target "$XM_TARGET" || return 1
             xm_info "REALITY 目标自动设置为 ${XM_TARGET}；需要其他目标时可在节点更多配置中修改。"
@@ -1068,8 +1068,8 @@ xm_menu_add() {
                 XM_PATH=
             done
             [[ -n $XM_PATH ]] || { xm_error '随机路径生成失败，请重试。'; return 1; }
-            xm_menu_draft "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" www.cloudflare.com www.cloudflare.com:443 "$XM_PATH" packet-up || return 1
-            xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'www.cloudflare.com' || return 2
+            xm_menu_draft "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" genshin.hoyoverse.com genshin.hoyoverse.com:443 "$XM_PATH" packet-up || return 1
+            xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'genshin.hoyoverse.com' || return 2
             XM_TARGET="${XM_SNI}:443"
             xm_menu_validate_field target "$XM_TARGET" || return 1
             xm_info "REALITY 目标自动设置为 ${XM_TARGET}；需要其他目标时可在节点更多配置中修改。"

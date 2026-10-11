@@ -111,7 +111,7 @@ sh install.sh v26.3.27
 | 名称 | 使用协议名称加随机后缀 |
 | 监听端口 | 使用随机未占用端口 1024..65535，排除已有节点端口 |
 | 对外地址 | 自动探测公网 IP；也可手动填写 IP 或域名 |
-| REALITY SNI / 目标 | `www.cloudflare.com` / 所填 SNI 的 443 端口 |
+| REALITY / XHTTP SNI 与目标 | `genshin.hoyoverse.com` / 所填 SNI 的 443 端口 |
 | UUID、REALITY 密钥、ShortID | 自动随机生成，保持隐藏 |
 | SS2022 主密钥 | 使用随机默认值，输入隐藏 |
 | XHTTP 路径 / 模式 | 随机 `/` 加 16 位十六进制路径 / `packet-up` |
@@ -128,10 +128,10 @@ sh install.sh v26.3.27
 
 ```sh
 # 替换为自己的服务器地址和 REALITY 目标；密钥/UUID/ShortID 自动生成
-xy add vless-reality node-a '我的 REALITY' 1443 server.example.com www.cloudflare.com www.cloudflare.com:443
+xy add vless-reality node-a '我的 REALITY' 1443 server.example.com genshin.hoyoverse.com genshin.hoyoverse.com:443
 
 # XHTTP 使用 REALITY 安全层，无须证书；路径请使用不同随机字符串
-xy add vless-xhttp node-b '我的 XHTTP' 2443 server.example.com www.cloudflare.com www.cloudflare.com:443 /a7d390ef52c1068b packet-up
+xy add vless-xhttp node-b '我的 XHTTP' 2443 server.example.com genshin.hoyoverse.com genshin.hoyoverse.com:443 /a7d390ef52c1068b packet-up
 
 # 使用 2022-blake3-aes-128-gcm，自动生成随机主密钥
 xy add shadowsocks node-c '我的 SS2022' 3443 server.example.com
@@ -141,7 +141,7 @@ xy share node-a
 xy --yes delete node-c
 ```
 
-交互添加 REALITY/XHTTP 只询问一次 SNI（域名或 IPv4），自动校验并设置目标为 `SNI:443`，会显示目标说明。需要其他目标时可通过节点的更多配置修改；CLI 仍接受独立的 SNI 与 TARGET。目标 TLS 服务需与 SNI 相容。
+交互添加 REALITY/XHTTP 只询问一次 SNI（域名或 IPv4），回车默认使用 `genshin.hoyoverse.com`，自动校验并设置目标为 `SNI:443`，会显示目标说明。已有节点保留原 SNI 与目标；编辑时回车保留当前值。需要其他目标时可通过节点的更多配置修改；CLI 仍接受独立的 SNI 与 TARGET。目标 TLS 服务需与 SNI 相容。
 
 交互菜单输入密码时隐藏字符。CLI 可传入密码，但会出现在调用者的 shell 历史或进程参数中，日常优先用菜单自动生成。生产配置关闭访问日志，仅保留警告和错误；日志轮转是周期检查，并非即时硬大小上限。分享链接和 JSON 备份包含客户端秘密；服务端 REALITY 私钥不会进入分享链接。
 
@@ -170,8 +170,8 @@ REALITY 公私钥须成对填写并匹配，一次验证完整新密钥对；不
 xy edit node-a name '新的显示名称'
 xy edit node-a port 1444
 xy edit node-a address server.example.com
-xy edit node-a sni www.cloudflare.com
-xy edit node-a target www.cloudflare.com:443
+xy edit node-a sni genshin.hoyoverse.com
+xy edit node-a target genshin.hoyoverse.com:443
 xy edit node-a short_id a4b7
 xy edit node-b path /new-random-path
 xy edit node-b mode packet-up
