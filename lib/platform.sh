@@ -820,6 +820,26 @@ platform_restart_schedule() (
 # Private system package update schedule. The manager owns every resource;
 # no cron entry or distro repository configuration is changed.
 _platform_update_schedule_period() { [[ ${1:-} == daily || ${1:-} == weekly || ${1:-} == monthly ]]; }
+# A calendar timer may fire after resume; accept only its scheduled local minute.
+# Return a distinct result on stdout so a skipped slot is not confused with an error.
+platform_system_update_schedule_due() (
+    [[ $# -eq 2 ]] && _platform_update_schedule_period "$1" && _platform_schedule_time "$2" || {
+        _platform_error '系统更新到点检查须为 daily|weekly|monthly HH:MM。'
+        return 2
+    }
+    local period=$1 target=$2 now clock weekday day
+    now=$(unset TZ; date '+%H:%M %u %d') || { _platform_error '无法读取本机时间。'; return 1; }
+    [[ $now =~ ^([01][0-9]|2[0-3]):[0-5][0-9]\ [1-7]\ (0[1-9]|[12][0-9]|3[01])$ ]] || {
+        _platform_error '本机时间格式无效。'
+        return 1
+    }
+    read -r clock weekday day <<< "$now"
+    if [[ $clock == "$target" ]] && {
+        [[ $period == daily ]] ||
+        [[ $period == weekly && $weekday == 1 ]] ||
+        [[ $period == monthly && $day == 01 ]]
+    }; then printf 'due\n'; else printf 'not-due\n'; fi
+)
 _platform_update_schedule_files() {
     printf '%s\n' "$XM_ETC/system-update-schedule"
     if [[ $XM_INIT == systemd ]]; then

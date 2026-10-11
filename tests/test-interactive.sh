@@ -320,6 +320,7 @@ pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation
 (
     TEST_SCHEDULE_CALL="$TEST_ROOT/system-schedule-call"
     TEST_SCHEDULE_ENABLED=0 TEST_SCHEDULE_FAIL=0 TEST_SYSTEM_CALL="$TEST_ROOT/scheduled-system-call"
+    TEST_DUE_RESULT=due TEST_DUE_FAILURE=0 TEST_DUE_CALL="$TEST_ROOT/system-schedule-due-call"
     xm_require_root() { return 0; }
     platform_detect() { return 0; }
     xm_ready() { return 0; }
@@ -331,6 +332,11 @@ pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation
         printf '%s\n' "$*" >> "$TEST_SCHEDULE_CALL"
         [[ $TEST_SCHEDULE_FAIL == 0 ]]
     }
+    platform_system_update_schedule_due() {
+        printf '%s\n' "$*" >> "$TEST_DUE_CALL"
+        [[ $TEST_DUE_FAILURE == 0 ]] || return 1
+        printf '%s\n' "$TEST_DUE_RESULT"
+    }
     platform_system_update() { printf 'update\n' >> "$TEST_SYSTEM_CALL"; return 0; }
     xm_confirm() { local answer; [[ $XM_YES == 1 ]] && return 0; IFS= read -r answer || return 2; xm_yes "$answer" || return 2; }
     if xm_dispatch system-update-schedule set yearly 04:00 >/dev/null 2>&1; then fail 'invalid system update period accepted'; else [[ $? == 2 ]] || fail 'invalid system update period status'; fi
@@ -341,6 +347,7 @@ pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation
     XM_ROOT='' XM_YES=0
     [[ $(xm_dispatch system-update-schedule status) == $'disabled\tmanual\t-\tUTC\t-' ]] || fail 'disabled system schedule status'
     if xm_dispatch scheduled-system-update >/dev/null 2>&1; then fail 'disabled scheduled worker ran'; fi
+    [[ ! -e $TEST_DUE_CALL ]] || fail 'disabled worker reached due check'
     [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'disabled worker reached package updater'
     printf 'n\n' > "$TEST_ROOT/input"
     if xm_dispatch system-update-schedule set daily 04:00 < "$TEST_ROOT/input" >/dev/null 2>&1; then fail 'declined system schedule enabled'; else [[ $? == 2 ]] || fail 'declined system schedule status'; fi
@@ -354,7 +361,18 @@ pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation
     xm_dispatch system-update-schedule set weekly 04:00 < "$TEST_ROOT/input" >/dev/null 2>&1 || fail 'confirmed weekly system schedule'
     [[ $(cat "$TEST_SCHEDULE_CALL") == 'set weekly 04:00' ]] || fail 'weekly schedule arguments'
     TEST_SCHEDULE_ENABLED=1
+    TEST_DUE_RESULT=not-due
+    xm_dispatch scheduled-system-update >/dev/null 2>&1 || fail 'late scheduled worker did not skip cleanly'
+    [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'late scheduled worker reached package updater'
+    TEST_DUE_RESULT=invalid
+    if xm_dispatch scheduled-system-update >/dev/null 2>&1; then fail 'invalid due response accepted'; fi
+    [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'invalid due response reached package updater'
+    TEST_DUE_RESULT=due TEST_DUE_FAILURE=1
+    if xm_dispatch scheduled-system-update >/dev/null 2>&1; then fail 'due calculation failure accepted'; fi
+    [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'due calculation failure reached package updater'
+    TEST_DUE_FAILURE=0
     xm_dispatch scheduled-system-update >/dev/null 2>&1 || fail 'enabled scheduled worker'
+    [[ $(cat "$TEST_DUE_CALL") == $'weekly 04:00\nweekly 04:00\nweekly 04:00\nweekly 04:00' ]] || fail 'scheduled worker due arguments'
     [[ $(cat "$TEST_SYSTEM_CALL") == update ]] || fail 'scheduled worker package dispatch'
     TEST_SCHEDULE_ENABLED=0
     printf 'n\n' > "$TEST_ROOT/input"

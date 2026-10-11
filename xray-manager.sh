@@ -764,10 +764,16 @@ xm_scheduled_system_update() {
     xm_require_root || return 1
     [[ -z $XM_ROOT ]] || { xm_error 'XM_ROOT 隔离模式禁止更新宿主系统软件包。'; return 1; }
     xm_ready || return 1
-    local schedule enabled period time timezone next
+    local schedule enabled period time timezone next due
     schedule=$(platform_system_update_schedule status) || return 1
     IFS=$'\t' read -r enabled period time timezone next <<< "$schedule"
     [[ $enabled == enabled ]] || { xm_error '系统软件包定时更新未启用，拒绝无确认执行。'; return 1; }
+    due=$(platform_system_update_schedule_due "$period" "$time") || return 1
+    case $due in
+        due) ;;
+        not-due) xm_info '当前计划时段未到或已错过，跳过系统软件包更新。'; return 0 ;;
+        *) xm_error '系统软件包定时更新到期判断结果无效，拒绝执行。'; return 1 ;;
+    esac
     platform_system_update || return $?
     xm_success '定时系统软件包更新完成。'
 }

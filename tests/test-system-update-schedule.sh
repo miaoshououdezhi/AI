@@ -17,6 +17,38 @@ reject platform_system_update_schedule set weekly 24:00
 reject platform_system_update_schedule set monthly 04:00 extra
 reject platform_system_update_schedule disable extra
 reject platform_system_update_schedule nonsense
+# Timer catch-up after suspend is skipped once the scheduled local minute has
+# passed. This read-only check must not consult init or inherit caller TZ.
+(
+    date() {
+        [[ ! ${TZ+x} && $* == '+%H:%M %u %d' ]] || return 91
+        [[ ${TEST_CLOCK_FAIL:-0} != 1 ]] || return 92
+        printf '%s\n' "$TEST_CLOCK"
+    }
+    export TZ=Pacific/Honolulu
+    TEST_CLOCK='04:00 1 05'
+    [[ $(platform_system_update_schedule_due daily 04:00) == due ]] || fail 'daily due minute'
+    [[ $(platform_system_update_schedule_due weekly 04:00) == due ]] || fail 'weekly Monday due minute'
+    [[ $(platform_system_update_schedule_due monthly 04:00) == not-due ]] || fail 'monthly wrong day'
+    TEST_CLOCK='04:01 1 01'
+    [[ $(platform_system_update_schedule_due daily 04:00) == not-due ]] || fail 'missed minute caught up'
+    [[ $(platform_system_update_schedule_due monthly 04:00) == not-due ]] || fail 'monthly missed minute caught up'
+    TEST_CLOCK='04:00 2 01'
+    [[ $(platform_system_update_schedule_due weekly 04:00) == not-due ]] || fail 'weekly wrong weekday'
+    [[ $(platform_system_update_schedule_due monthly 04:00) == due ]] || fail 'monthly first-day due minute'
+    TEST_CLOCK='04:00 2 02'
+    [[ $(platform_system_update_schedule_due daily 04:00) == due ]] || fail 'daily other-day due minute'
+    reject platform_system_update_schedule_due
+    reject platform_system_update_schedule_due daily 04:00 extra
+    reject platform_system_update_schedule_due hourly 04:00
+    reject platform_system_update_schedule_due daily 4:00
+    reject platform_system_update_schedule_due weekly 24:00
+    TEST_CLOCK='invalid'
+    reject platform_system_update_schedule_due daily 04:00
+    TEST_CLOCK_FAIL=1
+    reject platform_system_update_schedule_due daily 04:00
+)
+printf 'PASS: host-local current-minute due check and missed-slot rejection (date mock)\n'
 (
     export XM_ROOT=$test_dir/sandbox-root
     reject platform_system_update_schedule set daily 04:00
