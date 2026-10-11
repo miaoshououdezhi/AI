@@ -96,6 +96,10 @@ jobs:
               check_main
               xy --yes system-update-schedule set weekly 04:00
               rc-service xray-manager-system-update status
+              cat /etc/xray-manager/dependency-ledger.json
+              cat /etc/apk/world
+              apk info
+              python3 -c "import json,subprocess; j=json.load(open(\"/etc/xray-manager/dependency-ledger.json\")); names=sorted(set(j[\"added\"])-set(j[\"baseline\"])); print(\"DIAGNOSTIC added simulation\",names,flush=True); subprocess.run([\"apk\",\"del\",\"--simulate\",\"--\"]+names,check=True)"
               xy --yes uninstall
               test ! -e /etc/xray-manager
               test ! -e /opt/xray-manager
