@@ -338,7 +338,7 @@ pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation
     [[ ! -e $TEST_SCHEDULE_CALL ]] || fail 'invalid system schedule reached platform'
     if xm_main --yes system-update-schedule set daily 04:00 >/dev/null 2>&1; then fail 'sandbox system schedule permitted'; fi
     [[ ! -e $TEST_SCHEDULE_CALL ]] || fail 'sandbox schedule reached platform'
-    XM_ROOT= XM_YES=0
+    XM_ROOT='' XM_YES=0
     [[ $(xm_dispatch system-update-schedule status) == $'disabled\tmanual\t-\tUTC\t-' ]] || fail 'disabled system schedule status'
     if xm_dispatch scheduled-system-update >/dev/null 2>&1; then fail 'disabled scheduled worker ran'; fi
     [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'disabled worker reached package updater'

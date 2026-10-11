@@ -256,7 +256,7 @@ pass 'single document/object/128-node/duplicate checks precede complete protocol
     source "$REPO/lib/common.sh"
     # shellcheck disable=SC1090
     source "$REPO/lib/platform.sh"
-    XM_CODE_ROOT=$REPO
+    export XM_CODE_ROOT="$REPO"
     mkdir -p "$XM_HOME/bin" "$XM_HOME/assets" "$XM_ETC" "$XM_DATA" "$XM_LOG"
     for directory in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do printf 'xray-manager:1\n' > "$directory/.xray-manager-owned"; done
     printf '#!/bin/sh\nexit 0\n' > "$XM_BIN"; chmod 0755 "$XM_BIN"
