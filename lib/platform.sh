@@ -83,7 +83,7 @@ platform_detect() {
     case $id:$version in
         debian:12|debian:13) XM_OS=debian; XM_INIT=systemd ;;
         alpine:3.23|alpine:3.23.*|alpine:3.24|alpine:3.24.*) XM_OS=alpine; XM_INIT=openrc ;;
-        *) _platform_error "不支持的系统：$id $version（支持 Debian 12/13、Alpine 3.23/3.24）。"; return 1 ;;
+        *) _platform_error "不支持的系统：$id ${version}（支持 Debian 12/13、Alpine 3.23/3.24）。"; return 1 ;;
     esac
     XM_OS_VERSION=$version
     case $(uname -m) in
@@ -92,6 +92,40 @@ platform_detect() {
     esac
     XM_LIBC=glibc; [[ $XM_OS != alpine ]] || XM_LIBC=musl
     export XM_OS XM_OS_VERSION XM_INIT XM_ARCH XM_LIBC
+}
+
+platform_system_update() {
+    [[ $# -eq 0 ]] || { _platform_error '系统更新不接受参数。'; return 1; }
+    _platform_real || return 1
+    platform_detect || return 1
+    local status
+    case $XM_OS in
+        debian)
+            if apt-get --error-on=any update; then :; else
+                status=$?
+                _platform_error "APT 软件包索引更新失败（退出码 ${status}）。" || :
+                return "$status"
+            fi
+            if DEBIAN_FRONTEND=noninteractive apt-get upgrade --with-new-pkgs -y; then :; else
+                status=$?
+                _platform_error "APT 软件包升级失败（退出码 ${status}）。" || :
+                return "$status"
+            fi
+            ;;
+        alpine)
+            if apk update; then :; else
+                status=$?
+                _platform_error "APK 软件包索引更新失败（退出码 ${status}）。" || :
+                return "$status"
+            fi
+            if apk upgrade; then :; else
+                status=$?
+                _platform_error "APK 软件包升级失败（退出码 ${status}）。" || :
+                return "$status"
+            fi
+            ;;
+        *) _platform_error "不支持的系统：${XM_OS}。"; return 1 ;;
+    esac
 }
 
 platform_dependencies() {
@@ -962,7 +996,7 @@ PY
         [[ -n $port ]] || continue
         [[ $port =~ ^[0-9]{1,5}$ ]] && ((10#$port>=1 && 10#$port<=65535)) || return 1
         if [[ $type == anytls ]]; then sockets=$(ss -H -ltnp "sport = :$port"); else sockets=$(ss -H -lunp "sport = :$port"); fi
-        [[ $sockets == *"pid=$pid,"* ]] || { _platform_error "辅助核心未监听 $type 端口 $port。"; return 1; }
+        [[ $sockets == *"pid=$pid,"* ]] || { _platform_error "辅助核心未监听 $type 端口 ${port}。"; return 1; }
     done <<< "$nodes"
 }
 platform_extra_enabled() {
