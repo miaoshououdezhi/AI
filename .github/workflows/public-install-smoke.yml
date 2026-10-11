@@ -1,0 +1,61 @@
+name: Verify public system update installer
+on:
+  push:
+    branches: [codex/system-update-public-smoke-20261011]
+permissions:
+  contents: read
+jobs:
+  public-alpine-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install public main, verify runtime, update manager and system packages
+        env:
+          EXPECTED_MAIN: 66490146c6bc10c6e900e9aecff28f3b9cc9f217
+          EXPECTED_RUNTIME: fb32fa8b329481cefa4ddf4800ef2b760ea187d0
+        run: |
+          set -euo pipefail
+          docker run --rm --init --cap-add NET_ADMIN --cap-add SYS_PTRACE \
+            -e EXPECTED_MAIN -e EXPECTED_RUNTIME alpine:3.24 sh -ec '
+              apk add --no-cache bash openrc wget ca-certificates curl
+              mkdir -p /run/openrc
+              printf "default\n" > /run/openrc/softlevel
+              rc-service loopback start
+              wget -O /tmp/xray-manager-install.sh https://raw.githubusercontent.com/miaoshououdezhi/AI/main/deploy.sh
+              sh -n /tmp/xray-manager-install.sh
+              curl -fsSL https://api.github.com/repos/miaoshououdezhi/AI/git/ref/heads/main > /tmp/main-ref.json
+              grep -q "$EXPECTED_MAIN" /tmp/main-ref.json
+              grep -q "AI/archive/$EXPECTED_RUNTIME.tar.gz" /tmp/xray-manager-install.sh
+              sh /tmp/xray-manager-install.sh
+              curl -fsSL https://github.com/miaoshououdezhi/AI/archive/$EXPECTED_RUNTIME.tar.gz -o /tmp/runtime.tar.gz
+              mkdir /tmp/expected-runtime
+              tar -xzf /tmp/runtime.tar.gz -C /tmp/expected-runtime --strip-components=1
+              verify_code() {
+                for file in xray-manager.sh install.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc; do
+                  cmp "/tmp/expected-runtime/$file" "/opt/xray-manager/$file" || return 1
+                done
+              }
+              verify_code
+              xy diagnose
+              xy service status
+              xy help | grep update-system
+              printf "0\n" | xy > /tmp/menu.log 2>&1
+              grep -F "[5]  系统更新" /tmp/menu.log
+              sha256sum /etc/xray-manager/state.json /opt/xray-manager/bin/xray > /tmp/preserved.sha256
+              xy --yes update-manager
+              sha256sum -c /tmp/preserved.sha256
+              verify_code
+              xy --yes update-system
+              sha256sum -c /tmp/preserved.sha256
+              xy diagnose
+              xy service status
+              verify_code
+              curl -fsSL https://api.github.com/repos/miaoshououdezhi/AI/git/ref/heads/main > /tmp/main-ref-after.json
+              grep -q "$EXPECTED_MAIN" /tmp/main-ref-after.json
+              printf "PASS public main download, fresh Alpine install, runtime equality, healthy core, manager update preserves state/core, real system update\n"
+            '
+# Disposable container only: no host mounts, host networking or published ports.
+# NET_ADMIN is scoped to the container so OpenRC can initialize its loopback.
+# SYS_PTRACE is scoped to the container PID namespace for root to verify the
+# dedicated non-root core executable through /proc; no host processes are exposed.
+# This verifies OpenRC service operations inside Alpine, not full machine boot.
