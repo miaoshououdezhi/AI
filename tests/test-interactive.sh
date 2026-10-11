@@ -348,6 +348,7 @@ pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation
     TEST_SCHEDULE_FAIL=1
     if xm_main --yes system-update-schedule set daily 04:00 >/dev/null 2>&1; then fail 'platform schedule failure hidden'; fi
     TEST_SCHEDULE_FAIL=0
+    XM_YES=0
     : > "$TEST_SCHEDULE_CALL"
     printf 'YeS\n' > "$TEST_ROOT/input"
     xm_dispatch system-update-schedule set weekly 04:00 < "$TEST_ROOT/input" >/dev/null 2>&1 || fail 'confirmed weekly system schedule'
