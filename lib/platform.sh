@@ -380,15 +380,61 @@ platform_service() {
     fi
 }
 
+_platform_main_service_path() {
+    if [[ $XM_INIT == systemd ]]; then printf /etc/systemd/system/xray-manager.service; else printf /etc/init.d/xray-manager; fi
+}
+_platform_service_enable_link() { printf '/etc/runlevels/default/%s' "$1"; }
+platform_service_enabled() {
+    (($# == 1)) && [[ $1 == main || $1 == extra ]] || return 2
+    _platform_paths && _platform_init_available || return 2
+    local name=xray-manager target link
+    if [[ $1 == extra ]]; then
+        name=xray-manager-extra
+        platform_extra_preflight || return 2
+        target=$(_platform_extra_service_path)
+    else
+        _platform_main_resource_preflight || return 2
+        target=$(_platform_main_service_path)
+    fi
+    # Missing owned service resources have no boot flag to restore. Foreign
+    # resources/links were rejected by the resource preflight above.
+    [[ -e $target ]] || return 1
+    _platform_owned_file "$target" || return 2
+    if [[ $XM_INIT == systemd ]]; then
+        _platform_systemd_enabled "$name.service"
+    else
+        link=$(_platform_service_enable_link "$name")
+        [[ -L $link ]]
+    fi
+}
+
+# A failed systemctl query must not silently become a disabled snapshot.
+# Other states (masked/static/linked/runtime-only) cannot be restored faithfully
+# using this project's persistent enable/disable transaction; reject them.
+_platform_systemd_enabled() {
+    local state result=0
+    state=$(systemctl is-enabled "$1") || result=$?
+    case $state:$result in enabled:0) return 0 ;; disabled:1) return 1 ;; *) return 2 ;; esac
+}
+
 platform_logs() {
-    local lines=${1:-50}
+    (($# <= 2)) || { _platform_error '日志接受行数和 main|extra|update|restart 来源。'; return 2; }
+    local lines=${1:-50} source=${2:-main} name file
     [[ $lines =~ ^[0-9]+$ && ${#lines} -le 4 ]] && ((10#$lines >= 1 && 10#$lines <= 1000)) || { _platform_error '日志行数必须为 1..1000。'; return 1; }
+    case $source in
+        main) name=xray-manager; file=console.log ;;
+        extra) name=xray-manager-extra; file=extra-console.log ;;
+        update) name=xray-manager-system-update; file=system-update-schedule.log ;;
+        restart) name=xray-manager-restart; file=restart-schedule.log ;;
+        *) _platform_error '日志来源必须为 main|extra|update|restart。'; return 2 ;;
+    esac
     _platform_init_available || return 1
     if [[ $XM_INIT == systemd ]]; then
-        journalctl --unit xray-manager.service --no-pager --output short --lines "$((10#$lines))"
+        journalctl --unit "$name.service" --no-pager --output short --lines "$((10#$lines))"
     else
-        [[ -f ${XM_LOG:-/var/log/xray-manager}/console.log && ! -L ${XM_LOG:-/var/log/xray-manager}/console.log ]] || { _platform_error '暂无日志。'; return 1; }
-        tail -n "$((10#$lines))" -- "${XM_LOG:-/var/log/xray-manager}/console.log"
+        file=${XM_LOG:-/var/log/xray-manager}/$file
+        _platform_no_symlink "$file" && [[ -f $file ]] || { _platform_error '暂无日志或路径不安全。'; return 1; }
+        tail -n "$((10#$lines))" -- "$file"
     fi
 }
 
@@ -702,6 +748,24 @@ _platform_schedule_read_time() {
     [[ $marker == '# xray-manager-owned:1' ]] && _platform_schedule_time "$time" || return 1
     printf '%s\n' "$time"
 }
+platform_restart_schedule_due() (
+    (($# == 0)) || return 2
+    platform_restart_schedule_preflight || return 2
+    local target now result=0
+    [[ -e $XM_ETC/restart-schedule ]] || return 1
+    target=$(_platform_schedule_read_time) || { _platform_error '定时重启配置格式无效。'; return 2; }
+    if [[ $XM_INIT == systemd ]]; then
+        _platform_systemd_enabled xray-manager-restart.timer || result=$?
+        case $result in 0) ;; 1) return 1 ;; *) _platform_error '无法确认定时重启开机状态。'; return 2 ;; esac
+    else
+        _platform_schedule_enabled || return 1
+    fi
+    # OnCalendar can fire after resume even with Persistent=false. Only the
+    # configured server-local minute is eligible; never catch up missed runs.
+    now=$(unset TZ; date '+%H:%M') || { _platform_error '无法读取本机时间。'; return 2; }
+    _platform_schedule_time "$now" || { _platform_error '本机时间格式无效。'; return 2; }
+    [[ $now == "$target" ]]
+)
 _platform_schedule_local_next() {
     _platform_python - "${1:--}" <<'PYNEXT'
 import datetime, os, time, sys
@@ -1302,8 +1366,7 @@ PY
     done <<< "$nodes"
 }
 platform_extra_enabled() {
-    platform_extra_preflight || return 1
-    if [[ $XM_INIT == systemd ]]; then systemctl is-enabled --quiet xray-manager-extra.service; else [[ -L /etc/runlevels/default/xray-manager-extra ]]; fi
+    platform_service_enabled extra
 }
 
 # Package inventory and addition ledger: data only, never source package names.

@@ -458,3 +458,44 @@ rm -f -- "$XM_ROOT/etc/os-release"
 platform_system_info > "$TEST_ROOT/overview"
 grep -q $'OS\t未知' "$TEST_ROOT/overview" && grep -q $'Memory\t未知' "$TEST_ROOT/overview" || fail 'missing overview data not unknown'
 printf 'PASS: read-only six-field overview sanitizes untrusted OS/host and honors CPU/cgroup memory bounds\n'
+# Log selection keeps the original main default and fixed unit/file mappings.
+# Stub the init availability check and journalctl; OpenRC reads private files.
+(
+    source "$TEST_REPO/lib/platform.sh"
+    _platform_init_available() { return 0; }
+    journalctl() { printf '%s\n' "$*" > "$TEST_ROOT/journal-args"; }
+    XM_INIT=systemd
+    platform_logs 007
+    [[ $(cat "$TEST_ROOT/journal-args") == '--unit xray-manager.service --no-pager --output short --lines 7' ]] || fail 'default main journal changed'
+    for pair in main:xray-manager extra:xray-manager-extra update:xray-manager-system-update restart:xray-manager-restart; do
+        platform_logs 1000 "${pair%:*}"
+        [[ $(cat "$TEST_ROOT/journal-args") == "--unit ${pair#*:}.service --no-pager --output short --lines 1000" ]] || fail 'journal source mapping'
+    done
+    expect_fail platform_logs 0 main
+    expect_fail platform_logs 1001 main
+    expect_fail platform_logs 50 invalid
+    expect_fail platform_logs 50 main extra
+    XM_INIT=openrc; XM_LOG=$TEST_ROOT/selected-logs; mkdir "$XM_LOG"
+    for pair in main:console extra:extra-console update:system-update-schedule restart:restart-schedule; do
+        printf '%s first\n%s final\n' "${pair%:*}" "${pair%:*}" > "$XM_LOG/${pair#*:}.log"
+        [[ $(platform_logs 1 "${pair%:*}") == "${pair%:*} final" ]] || fail 'OpenRC log source mapping'
+    done
+    rm "$XM_LOG/extra-console.log"
+    expect_fail platform_logs 10 extra
+    ln -s "$XM_LOG/console.log" "$XM_LOG/extra-console.log"
+    expect_fail platform_logs 10 extra
+    rm "$XM_LOG/extra-console.log"
+    mv "$XM_LOG" "$XM_LOG.original"; ln -s "$XM_LOG.original" "$XM_LOG"
+    expect_fail platform_logs 10 main
+)
+python3 - "$TEST_REPO/assets/xray-manager.logrotate" <<'PY'
+import pathlib,re,sys
+text=pathlib.Path(sys.argv[1]).read_text()
+blocks=re.findall(r'([^{}]+)\{([^{}]+)\}',text)
+for name,mode in [('console','0640 root xray-manager'),('extra-console','0640 root xray-manager'),('restart-schedule','0600 root root'),('system-update-schedule','0600 root root')]:
+ matches=[body for paths,body in blocks if '/var/log/xray-manager/'+name+'.log' in paths.split()]
+ assert len(matches)==1, name
+ assert 'create '+mode in matches[0] and 'rotate 4' in matches[0] and 'maxsize 10M' in matches[0],name
+print('PASS: all OpenRC log sources have bounded rotation and matching ownership/mode')
+PY
+printf 'PASS: log source selection, fixed journal units, default compatibility and symlink rejection\n'

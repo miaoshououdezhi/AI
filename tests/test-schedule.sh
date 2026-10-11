@@ -74,7 +74,14 @@ _platform_schedule_control() {
     esac
 }
 systemctl() {
-    case $1 in daemon-reload) return 0 ;; show) printf 'Sat 2026-10-03 04:00:00 UTC\n' ;; *) fail 'unexpected systemctl' ;; esac
+    case $1 in
+        daemon-reload) return 0 ;;
+        show) printf 'Sat 2026-10-03 04:00:00 UTC\n' ;;
+        is-enabled)
+            if [[ -f $test_dir/query-error ]]; then printf 'Failed to query\n' >&2; return 1; fi
+            if [[ -f $test_dir/enabled ]]; then printf 'enabled\n'; else printf 'disabled\n'; return 1; fi ;;
+        *) fail 'unexpected systemctl' ;;
+    esac
 }
 export XM_INIT=systemd
 platform_restart_schedule set 04:00
@@ -82,6 +89,32 @@ platform_restart_schedule set 04:00
 [[ -f $test_dir/running && -f $test_dir/enabled ]] || fail 'initial scheduler activation'
 grep -q 'OnCalendar=\*-\*-\* 04:00:00' "$test_dir/units/xray-manager-restart.timer" || fail 'calendar template'
 [[ $(platform_restart_schedule status) == enabled$'\t'04:00$'\t'* ]] || fail 'status format'
+# Only the configured local minute may restart, including systemd late/resume
+# triggers. Query/config/clock failure must remain distinguishable from a skip.
+(
+    expect_due_exit() {
+        local want=$1 result=0
+        platform_restart_schedule_due > "$test_dir/due.out" 2> "$test_dir/due.err" || result=$?
+        [[ $result == "$want" ]] || fail "restart due expected $want got $result"
+    }
+    TEST_DUE_CLOCK=04:00
+    date() { [[ ! ${TZ+x} && $* == +%H:%M ]] || return 99; printf '%s\n' "$TEST_DUE_CLOCK"; }
+    TZ=America/New_York; export TZ
+    expect_due_exit 0
+    TEST_DUE_CLOCK=12:00; expect_due_exit 1
+    TEST_DUE_CLOCK=04:00
+    rm "$test_dir/enabled"; expect_due_exit 1; touch "$test_dir/enabled"
+    touch "$test_dir/query-error"; expect_due_exit 2; rm "$test_dir/query-error"
+    TEST_DUE_CLOCK=bad; expect_due_exit 2
+    date() { return 1; }; expect_due_exit 2
+    date() { printf '04:00\n'; }
+    cp "$XM_ETC/restart-schedule" "$test_dir/due-state"
+    printf '# xray-manager-owned:1\ninvalid\n' > "$XM_ETC/restart-schedule"; expect_due_exit 2
+    rm "$XM_ETC/restart-schedule"; expect_due_exit 1
+    mv "$test_dir/due-state" "$XM_ETC/restart-schedule"
+    expect_due_exit 0
+)
+printf 'PASS: restart due exact local minute, disabled/missing skip and query/config/clock errors\n'
 cp "$XM_ETC/restart-schedule" "$test_dir/before"
 printf 'trailing-without-newline' >> "$XM_ETC/restart-schedule"
 reject _platform_schedule_read_time
@@ -101,6 +134,16 @@ cp "$repo/assets/xray-manager-restart.py" "$XM_HOME/assets/xray-manager-restart.
 platform_restart_schedule set 23:59
 [[ $(_platform_schedule_read_time) == 23:59 ]] || fail 'OpenRC schedule'
 [[ $(platform_restart_schedule status) == enabled$'\t'23:59$'\t'* ]] || fail 'OpenRC status'
+(
+    date() { printf '23:59\n'; }
+    platform_restart_schedule_due || fail 'OpenRC exact minute rejected'
+    date() { printf '00:00\n'; }
+    reject platform_restart_schedule_due
+    rm "$test_dir/enabled"
+    date() { printf '23:59\n'; }
+    reject platform_restart_schedule_due
+    touch "$test_dir/enabled"
+)
 grep -q '/opt/xray-manager/assets/xray-manager-restart.py' "$test_dir/units/xray-manager-restart" || fail 'OpenRC private runner'
 cp "$XM_ETC/restart-schedule" "$test_dir/before-openrc"
 touch "$test_dir/fail-start"

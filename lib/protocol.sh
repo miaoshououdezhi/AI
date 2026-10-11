@@ -20,12 +20,21 @@ _protocol_error() {
 
 protocol_validate_node() {
     [[ $# == 1 || $# == 2 ]] || { _protocol_error '需要节点 JSON [strict|maintenance]'; return 1; }
-    local mode=${2:-strict}
-    [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
-    printf '%s' "$1" | "${XM_PYTHON:-python3}" "$_XM_PROTOCOL_OUTBOUND" validate-node || return 1
-    printf '%s' "$1" | "${XM_PYTHON:-python3}" -c '
+    printf '%s' "$1" | _protocol_validate_json "${2:-strict}" node
+}
 
-import base64, datetime, ipaddress, json, os, re, subprocess, sys, unicodedata, uuid
+# Every call validates the current file contents. This batches interpreter
+# startup only: strict/maintenance semantics and OpenSSL checks stay identical.
+protocol_validate_nodes() {
+    [[ ($# == 1 || $# == 2) && -f $1 && ! -L $1 ]] || { _protocol_error '需要普通状态 JSON 文件 [strict|maintenance]'; return 1; }
+    _protocol_validate_json "${2:-strict}" nodes < "$1"
+}
+
+_protocol_validate_json() {
+    local mode=$1 shape=$2
+    [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
+    "${XM_PYTHON:-python3}" -c '
+import base64, datetime, importlib.util, ipaddress, json, os, re, subprocess, sys, unicodedata, uuid
 def need(ok, message):
     if not ok: raise ValueError(message)
 def text(n, key, lo=1, hi=1024):
@@ -47,8 +56,13 @@ def openssl(args,data=None):
     r=subprocess.run(["openssl"]+args,input=data,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     need(r.returncode==0,"密钥或证书校验失败")
     return r.stdout
-try:
-    n=json.load(sys.stdin); need(isinstance(n,dict),"节点必须是对象")
+def validate(n):
+    need(isinstance(n,dict),"节点必须是对象")
+    try: outbound.validate_node(n)
+    except (ValueError,TypeError,KeyError,OSError,IndexError):
+        # URI parser exceptions may include a credential or malformed port.
+        # Preserve the existing outbound CLI redaction at this shared boundary.
+        raise ValueError("出站路由：节点链接或规则无效、含不支持的参数；请检查支持范围。") from None
     t=text(n,"type"); common={"id","name","type","port","address"}
     extras={"vless-reality":{"uuid","private_key","public_key","short_id","sni","target"},"vless-xhttp":{"uuid","private_key","public_key","short_id","sni","target","path","mode"},"shadowsocks":{"method","password"},"vless-ws":{"uuid","sni","path","tls_cert","tls_key"},"socks5":{"username","password"},"anytls":{"sni","tls_cert","tls_key","password"},"hysteria2":{"sni","tls_cert","tls_key","password"},"tuicv5":{"sni","tls_cert","tls_key","uuid","password"}}
     need(t in extras,"未知协议")
@@ -102,11 +116,23 @@ try:
         need(text(n,"method")=="2022-blake3-aes-128-gcm","仅支持 SS2022 AES-128-GCM")
         pwd=text(n,"password"); raw=base64.b64decode(pwd,validate=True)
         need(len(raw)==16 and base64.b64encode(raw).decode()==pwd,"SS2022 密码必须是 16 字节标准 Base64 密钥")
+try:
+    sys.dont_write_bytecode=True
+    spec=importlib.util.spec_from_file_location("xray_outbound",sys.argv[3])
+    outbound=importlib.util.module_from_spec(spec); spec.loader.exec_module(outbound)
+    values=json.load(sys.stdin)
+    if sys.argv[2]=="node":
+        validate(values)
+    else:
+        need(isinstance(values,dict),"状态必须是对象")
+        nodes=values.get("nodes")
+        need(isinstance(nodes,list) and len(nodes)<=128,"nodes 须为对象列表且最多 128 个节点")
+        for node in nodes: validate(node)
 except (ValueError,TypeError,KeyError,OSError) as e:
     color=os.environ.get("XM_UI_RED","") if sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM","dumb")!="dumb" else ""
     color=color if color=="\x1b[38;2;255;0;0m" else ""
     print(color+"[错误] 协议："+str(e)+("\x1b[0m" if color else ""),file=sys.stderr); sys.exit(1)
-' "$mode"
+' "$mode" "$shape" "$_XM_PROTOCOL_OUTBOUND"
 }
 
 protocol_new() {
@@ -178,7 +204,7 @@ protocol_new() {
 
 protocol_generate() {
     [[ ($# == 2 || $# == 3) && -f $1 && ! -L $1 && ! -L $2 ]] || { _protocol_error '状态或输出路径无效'; return 1; }
-    local state=$1 output=$2 node listen mode=${3:-strict}
+    local state=$1 output=$2 listen mode=${3:-strict}
     [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
     listen=$("${XM_PYTHON:-python3}" -c '
 import errno,socket
@@ -196,7 +222,7 @@ except OSError as e:
         listen=0.0.0.0
     fi
     jq -e 'type=="object" and .schema_version==1 and (.nodes|type=="array") and (.nodes|length<=128) and (.nodes|map(.id)|length== (unique|length)) and (.nodes|map(.port)|length==(unique|length))' "$state" >/dev/null || { _protocol_error '状态 schema 或重复 ID/端口无效'; return 1; }
-    while IFS= read -r node; do protocol_validate_node "$node" "$mode" || return 1; done < <(jq -c '.nodes[]' "$state")
+    protocol_validate_nodes "$state" "$mode" || return 1
     if [[ $listen == 0.0.0.0 ]] && jq -e '.nodes|any(.address|contains(":"))' "$state" >/dev/null; then
         _protocol_error '当前服务器 IPv6 不可用，请使用 IPv4 地址或域名'; return 1
     fi
@@ -292,7 +318,7 @@ except (OSError,ValueError,UnicodeError) as e:
 
 protocol_generate_extra() {
     [[ ($# == 2 || $# == 3) && -f $1 && ! -L $1 && ! -L $2 ]] || { _protocol_error '状态或输出路径无效'; return 1; }
-    local node listen mode=${3:-strict}
+    local listen mode=${3:-strict}
     [[ $mode == strict || $mode == maintenance ]] || { _protocol_error '校验模式无效'; return 1; }
     listen=$("${XM_PYTHON:-python3}" -c '
 import errno,socket
@@ -305,7 +331,7 @@ except OSError as e:
     if [[ -d /proc/sys/net && ! -e /proc/net/if_inet6 ]] || [[ -r /proc/sys/net/ipv6/conf/all/disable_ipv6 && $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6) == 1 ]]; then listen=0.0.0.0; fi
     if [[ $listen == 0.0.0.0 ]] && jq -e '.nodes|any(.address|contains(":"))' "$1" >/dev/null; then _protocol_error '当前服务器 IPv6 不可用'; return 1; fi
     jq -e '.schema_version==1 and (.nodes|type=="array") and (.nodes|length<=128) and (.nodes|map(.id)|length==(unique|length)) and (.nodes|map(.port)|length==(unique|length))' "$1" >/dev/null || return 1
-    while IFS= read -r node; do protocol_validate_node "$node" "$mode" || return 1; done < <(jq -c '.nodes[]' "$1")
+    protocol_validate_nodes "$1" "$mode" || return 1
     (umask 077; : > "$2"; chmod 600 "$2" || exit 1
     jq --arg listen "$listen" '{log:{level:"warn",timestamp:true},inbounds:[.nodes[]|select(.type=="anytls" or .type=="hysteria2" or .type=="tuicv5")|
       {type:(if .type=="tuicv5" then "tuic" else .type end),tag:("node-"+.id),listen:$listen,listen_port:.port,tls:{enabled:true,server_name:.sni,certificate:(.tls_cert|split("\n")),key:(.tls_key|split("\n"))}}+

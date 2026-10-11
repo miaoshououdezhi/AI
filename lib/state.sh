@@ -12,7 +12,7 @@ XM_TX_EXTRA_HAD_BIN=1
 XM_TX_EXTRA_HAD_SERVICE=1
 
 state_validate() {
-    local file=$1 mode=${2:-strict} node bytes
+    local file=$1 mode=${2:-strict} bytes
     case $mode in strict|maintenance) ;; *) xm_error '未知配置验证模式。'; return 2 ;; esac
     [[ -f $file && ! -L $file ]] || { xm_error '状态必须是普通 JSON 文件。'; return 1; }
     bytes=$(wc -c < "$file") || return 1
@@ -23,7 +23,7 @@ state_validate() {
     jq -e '.nodes as $nodes | ["id","name","port","uuid","private_key","public_key","short_id","password","username","path"] | all(. as $key | ($nodes | map(.[$key]) | map(select(.!=null))) as $values | ($values|unique|length)==($values|length))' "$file" >/dev/null || {
         xm_error '节点 ID、名称、端口、凭据或路径重复。'; return 1;
     }
-    while IFS= read -r node; do protocol_validate_node "$node" "$mode" || return 1; done < <(jq -c '.nodes[]' "$file")
+    protocol_validate_nodes "$file" "$mode"
 }
 # Only edit/delete may preserve exact existing nodes with expired TLS.
 # Changed/new nodes remain strict; identity alone never grants an exception.
@@ -88,7 +88,7 @@ state_rollback() {
     xm_warning '已恢复操作前的配置、核心与各服务运行状态。'
 }
 state_apply() {
-    local candidate=$1 new_core=${2:-} validate_core=${2:-$XM_BIN} mode=${3:-strict} failed=0 has_extra=0 old_has_extra=0
+    local candidate=$1 new_core=${2:-} validate_core=${2:-$XM_BIN} mode=${3:-strict} failed=0 has_extra=0 old_has_extra=0 enabled_status=0
     XM_TX_EXTRA_PREPARED=0; XM_TX_EXTRA_HAD_BIN=1; XM_TX_EXTRA_HAD_SERVICE=1
     case $mode in
         strict) state_validate "$candidate" || return 1 ;;
@@ -116,7 +116,16 @@ state_apply() {
         XM_TX_EXTRA_AVAILABLE=1
     fi
     XM_TX_EXTRA_ENABLED=0
-    if [[ $XM_TX_EXTRA_AVAILABLE == 1 ]]; then platform_extra_enabled && XM_TX_EXTRA_ENABLED=1; fi
+    if [[ $XM_TX_EXTRA_AVAILABLE == 1 ]]; then
+        if platform_extra_enabled; then XM_TX_EXTRA_ENABLED=1; else
+            enabled_status=$?
+            if [[ $enabled_status != 1 ]]; then
+                xm_error '无法确认辅助核心开机状态，未切换配置。'
+                if [[ $XM_TX_EXTRA_PREPARED == 1 ]]; then platform_extra_discard_new "$XM_TX_EXTRA_HAD_BIN" "$XM_TX_EXTRA_HAD_SERVICE" || xm_error '新辅助核心资源撤销失败，请诊断。'; fi
+                XM_TX_EXTRA_PREPARED=0; xm_temp_cleanup; return 1
+            fi
+        fi
+    fi
     if [[ -f $XM_STATE ]] && protocol_has_extra "$XM_STATE"; then old_has_extra=1; fi
     XM_TX_RUNNING=0; XM_TX_EXTRA_RUNNING=0; XM_TX_CORE=0; XM_TX_HISTORY=0
     xm_service_call status >/dev/null 2>&1 && XM_TX_RUNNING=1

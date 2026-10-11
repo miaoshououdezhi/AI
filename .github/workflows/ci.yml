@@ -32,6 +32,8 @@ jobs:
           done
       - name: Shell transactions
         run: bash tests/test-shell.sh
+      - name: Review fixes, private export and failure recovery
+        run: bash tests/test-review-fixes.sh
       - name: Interactive defaults, validation and terminal styles
         run: bash tests/test-interactive.sh
       - name: Management script update and code rollback

@@ -223,7 +223,7 @@ xy --yes route delete reality-1
 
 ## 导出与导入配置
 
-数据菜单仅有“导出配置”和“导入配置”。导出默认 `/root/xray-manager-export-时间戳.json`，也可输入任意已有目录中的绝对文件路径；目标必须不存在，保存 `0600` 私密 JSON，并明确显示位置与节点数。文件包含全部节点、每个节点的出站路由和完整上游链接、服务器私钥、密码及 TLS PEM，不需要原证书文件就能迁移。
+数据菜单仅有“导出配置”和“导入配置”。导出默认 `/root/xray-manager-export-时间戳.json`，也可输入已有目录中的绝对文件路径；目标必须不存在，独占创建普通 `0600` 私密 JSON，并明确显示位置与节点数。已有普通文件、FIFO、目录、符号链接及符号链接父目录均拒绝，写入失败会清理本次创建的未完成文件。文件包含全部节点、每个节点的出站路由和完整上游链接、服务器私钥、密码及 TLS PEM，不需要原证书文件就能迁移。
 
 ```sh
 xy export /root/xray-manager-export.json
@@ -251,6 +251,9 @@ xy --yes system-update-schedule set monthly 04:00 # 每月 1 日
 xy --yes system-update-schedule disable           # 不定时，仅手动
 xy --yes update-system                             # 立即更新
 xy logs 80
+xy logs extra 80     # 辅助核心
+xy logs update 80    # 系统更新任务
+xy logs restart 80   # 核心定时重启任务
 xy diagnose
 
 # 升级版本必须实际存在于 XTLS/Xray-core 官方 release
@@ -269,13 +272,17 @@ xy --yes uninstall
 
 所有变更由 `flock` 互斥。脚本先验证 JSON 和协议结构，再调用候选 Xray `xray run -test` 和有辅助节点时的 `sing-box check`，随后在同一文件系统中原子替换文件。重启或健康检查失败会恢复旧状态、配置、核心和运行状态；原来停止的服务在更新配置后仍保持停止。
 
-服务日志按周期轮转（非瞬时硬上限），高日志量时需监控磁盘占用。
+服务的开机启动设置会分别记录两核心的原标志，部分失败时恢复；无法确认原标志时拒绝修改，恢复失败会明确提示。`diagnose` 会汇总各核心的配置与服务结果，主核心失败不会提前跳过辅助核心检查；已停止的服务会单独说明，需确认是否为手动停止。
+
+主菜单“查看日志”可选择主核心、辅助核心、系统更新或定时重启。节点状态损坏或首次安装失败时仍可查看受管日志。Debian 读取对应服务 journal；Alpine 四类日志均按日检查轮转，单文件 `maxsize 10M`、保留 4 份，核心日志权限 `0640`，调度日志 `0600`。轮转是周期检查，非瞬时硬上限，高日志量时仍需监控磁盘占用。
 
 升级成功后保存上一核心及其版本，`rollback` 在原生校验通过后切换；再次回退可以切换回上一版本。恢复 JSON 只替换节点、保留当前核心版本；未知 schema、重复 ID/端口、不合法字段及不安全路径被拒绝。`config.json` 由状态生成，直接编辑会被诊断和服务启动检测为不一致。
 
 下载仅使用官方 HTTPS release，核对其 `.dgst` 的 SHA256，并检查压缩包路径、文件类型、大小及 ELF 架构。摘要与资源来自同一发行源，摘要校验不等同于独立签名验证。安装需要 root，Xray 使用专用非登录账户运行。
 
 信号 `INT`/`TERM` 会触发回退和清理；断电或 `SIGKILL` 无法运行清理逻辑。此时先运行 `diagnose`，保留 `/etc/xray-manager/.transaction.*` 现场以便从旧副本恢复，不应手工删除现场后直接重启。完全卸载先核对每个自有文件、目录、服务、账户和依赖计划，移除项目目录内配置、私密历史备份、日志、缓存、两个核心、服务、调度、`xy` 和专用账户。遇到未知文件、外部服务覆盖或符号链接会拒绝并保留现场，不递归误删陌生文件。用户在受管目录外的导出和证书不会删除。
+
+首次安装启动失败后，可以重试 `install`；若决定放弃，也可运行当前安装器目录中的 `bash xray-manager.sh --yes uninstall` 清理受管现场。此路径不要求状态和核心已完整写入，仍必须通过相同的目录所有权、文件白名单、账户、服务及依赖安全预检；不会猜测清理不明残留。
 
 远程部署、Bash 引导和依赖安装前记录完整已装包基线，仅记录本脚本新增包；重复安装不接管其他软件后来新增的包。完全卸载仅移除已记录、不是其他软件依赖且包管理器模拟删除清单安全的依赖；历史安装没有依赖记录时不猜删。系统既有包、SSH、其他软件依赖保留。
 
@@ -311,9 +318,12 @@ bash tests/test-outbound-protocol.sh
 bash tests/test-migration.sh
 bash tests/test-ui.sh
 bash tests/test-platform.sh
+bash tests/test-review-fixes.sh
 bash tests/test-system-update-schedule.sh
 bash tests/test-protocol.sh
 ```
+
+批量节点的协议及证书校验在单次 Python 进程中执行，每次仍读取并完整检查当前候选；不复用跨命令的旧校验结果。维护模式只允许完全未变的旧节点保留已过期证书，变更节点仍执行严格校验；两核心原生配置检查保持不变。
 
 `test-interactive.sh` 使用真实协议校验、模拟外部查询及真实 PTY，覆盖回车随机默认值、XHTTP、字段重提示、编号选择及列表变化保护、查询失败手动回退、取消/EOF、大小写确认、定时重启输入与停止核心跳过、系统更新计划菜单与互斥、升级二次确认以及颜色降级。`test-system-update-schedule.sh` 使用隔离状态和模拟服务验证计划周期、配置严格解析、启停/失败恢复，不会升级宿主软件包。CI 另用 `systemd-analyze` 验证三种日历表达式和生成的 systemd unit，不启动服务。
 

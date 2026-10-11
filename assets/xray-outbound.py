@@ -46,7 +46,13 @@ def parse_uri(uri):
     if uri.startswith("ss://") and "@" not in uri.split("#", 1)[0]:
         body, sep, fragment = uri[5:].partition("#")
         need("?" not in body, "不支持此 Shadowsocks 链接参数")
-        uri = "ss://" + unbase(body) + (sep + fragment if sep else "")
+        # This historical format is not RFC3986: decoded credentials are
+        # plaintext, including %, @, /, ?, and #. Encode them exactly once for
+        # the common URI parser instead of treating them as an already escaped
+        # URL (which would corrupt the password or reinterpret its separators).
+        credential, at, endpoint = unbase(body).rpartition("@")
+        need(at and not any(c in endpoint for c in "/?#@"), "Shadowsocks 凭据或地址格式无效")
+        uri = "ss://" + urllib.parse.quote(credential, safe="") + "@" + endpoint + (sep + fragment if sep else "")
     u = urllib.parse.urlsplit(uri)
     need(u.scheme in {"vless", "trojan", "ss", "socks", "socks5"}, "不支持此出站链接协议")
     need(u.path in ("", "/") and "@" in u.netloc, "节点链接结构无效")
@@ -115,6 +121,9 @@ def parse_uri(uri):
         need(bool(re.fullmatch(r"(?:[a-fA-F0-9]{2}){0,8}", sid)), "REALITY shortId 格式无效")
         spx = q.get("spx", "/")
         need(spx.startswith("/"), "REALITY spiderX 必须以 / 开头")
+        # The outer query was decoded once; Xray parses this value as another
+        # URL. Reject malformed inner escapes before its native Build stage.
+        need(not re.search(r"%(?![0-9A-Fa-f]{2})", spx), "REALITY spiderX 百分号编码无效")
         need("alpn" not in q, "REALITY 链接不支持 alpn 参数")
         stream["realitySettings"] = {"serverName": sni, "fingerprint": fp, "password": pbk, "shortId": sid, "spiderX": spx}
     else:

@@ -72,7 +72,7 @@ XRAY_BIN=/path/to/xray bash tests/test-xhttp.sh --e2e
 
 ## XHTTP + REALITY
 
-核实日期 2026-10-03，兼容基线 **v26.3.27**，最新预览版源码核实 **v26.9.30**。`path` 为 2–128 字符，以 `/` 开头，只含 ASCII 字母、数字、`/`、`_`、`-`，禁止连续斜线；交互默认使用随机路径。`mode` 只允许 `packet-up`（默认）、`auto`、`stream-up`、`stream-one`。固定基线的 `auto` 在 REALITY 客户端实际选择 `stream-one`。XHTTP 不添加 `xtls-rprx-vision` flow；分享链接具有 `type=xhttp`、`path`、`mode` 以及 REALITY 客户端字段，不包含服务端私钥。无需 Nginx 或外部证书。REALITY 目标应支持 TLS 1.3 和 H2，默认 `www.cloudflare.com:443`。
+核实日期 2026-10-03，兼容基线 **v26.3.27**，最新预览版源码核实 **v26.9.30**。`path` 为 2–128 字符，以 `/` 开头，只含 ASCII 字母、数字、`/`、`_`、`-`，禁止连续斜线；交互默认使用随机路径。`mode` 只允许 `packet-up`（默认）、`auto`、`stream-up`、`stream-one`。固定基线的 `auto` 在 REALITY 客户端实际选择 `stream-one`。XHTTP 不添加 `xtls-rprx-vision` flow；分享链接具有 `type=xhttp`、`path`、`mode` 以及 REALITY 客户端字段，不包含服务端私钥。无需 Nginx 或外部证书。REALITY 目标应支持 TLS 1.3 和 H2，交互默认 SNI 为 `genshin.hoyoverse.com`、target 为 `genshin.hoyoverse.com:443`。
 
 `tests/test-xhttp.sh` 检查非法 path/mode、字段缺失、随机凭据、IPv6/名称 URI 编码以及四种模式原生配置。加 `--e2e` 后在随机 loopback 端口运行真实 Xray 双方与本地 HTTP fixture，逐模式校验响应；仅测试副本移除私网阻断以访问自身 fixture，产品路由保持私网阻断。REALITY 握手仍需访问配置的公网伪装目标。第三方 GUI 客户端导入兼容未实测。
 

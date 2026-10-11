@@ -434,6 +434,7 @@ printf 'n\n' > "$TEST_ROOT/input"
 if xm_dispatch schedule disable < "$TEST_ROOT/input" >/dev/null 2>&1; then fail 'schedule decline accepted'; fi
 [[ ! -e $TEST_ROOT/schedule-call ]] || fail 'declined schedule reached platform'
 TEST_RUNNING=0; TEST_RESTARTED=0
+platform_restart_schedule_due() { return 0; }
 xm_service_call() { if [[ $1 == status ]]; then [[ $TEST_RUNNING == 1 ]]; else TEST_RESTARTED=$((TEST_RESTARTED+1)); fi; }
 xm_service_validate() { return 0; }
 platform_health() { return 0; }
@@ -457,6 +458,7 @@ pass 'schedule strict time, y confirmation, decline, and stopped-core skip'
     xm_menu_add() { printf 'add\n' >> "$TEST_ROOT/routes"; }
     xm_menu_service() { printf 'service\n' >> "$TEST_ROOT/routes"; }
     xm_menu_system_update() { printf 'system-update-menu\n' >> "$TEST_ROOT/routes"; }
+    xm_menu_logs() { printf 'logs\n' >> "$TEST_ROOT/routes"; }
     printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n/tmp/export.json\n14\n/tmp/import.json\n15\n0\n' > "$TEST_ROOT/route-input"
     xm_menu < "$TEST_ROOT/route-input" >/dev/null 2> "$TEST_ROOT/route-log" || fail 'main menu route loop'
     printf 'install\nupgrade\nrollback\nupdate-manager\nsystem-update-menu\nnode-view\nadd\nnode-delete\nnode-share\nservice\nlogs\ndiagnose\nexport\nimport\nuninstall\n' > "$TEST_ROOT/expected-routes"

@@ -59,7 +59,8 @@ xray-manager — Xray 中文交互管理
   share ID                       显式输出含客户端秘密的分享链接
   service start|stop|restart|status|enable|disable
   schedule status|set HH:MM|disable 每日本机时区定时重启（停止的核心跳过）
-  logs [行数]                    显示最近日志，默认 80 行
+  logs [main|extra|update|restart] [行数]
+                                 显示指定日志；兼容 logs [行数]，默认主核心 80 行
   diagnose                       检查版本、配置和服务健康
   export /绝对路径/配置.json      导出全部节点/出站路由/TLS PEM（0600），拒绝覆盖
   backup                         export 的兼容别名
@@ -528,6 +529,14 @@ xm_services_restore_running() {
     if [[ $extra_running == 1 ]]; then xm_extra_service_call start >/dev/null 2>&1 && platform_extra_health >/dev/null 2>&1 || failed=1; fi
     return "$failed"
 }
+xm_services_restore_enabled() {
+    local main_enabled=$1 extra_enabled=$2 include_extra=$3 failed=0
+    if [[ $main_enabled == 1 ]]; then xm_service_call enable || failed=1; else xm_service_call disable || failed=1; fi
+    if [[ $include_extra == 1 ]]; then
+        if [[ $extra_enabled == 1 ]]; then xm_extra_service_call enable || failed=1; else xm_extra_service_call disable || failed=1; fi
+    fi
+    return "$failed"
+}
 xm_service_validate() {
     xm_work_begin && xm_private_temp || return 1
     protocol_generate "$XM_STATE" "$XM_TEMP_DIR/check.json" && state_native_validate "$XM_BIN" "$XM_TEMP_DIR/check.json" || return 1
@@ -543,6 +552,7 @@ xm_service() {
     case $1 in start|stop|restart|status|enable|disable) ;; *) xm_usage_error '未知服务操作。'; return 2 ;; esac
     xm_ready || return 1
     local main_running=0 extra_running=0 failed=0 action=$1
+    local main_enabled=0 extra_enabled=0 include_extra=0 enabled_status=0
     xm_service_call status >/dev/null 2>&1 && main_running=1
     if [[ -x $XM_EXTRA_BIN ]]; then xm_extra_service_call status >/dev/null 2>&1 && extra_running=1; fi
     if [[ $action == status ]]; then
@@ -551,6 +561,19 @@ xm_service() {
         return 0
     fi
     if [[ $action == start || $action == restart ]]; then xm_service_validate || return 1; fi
+    if [[ $action == enable || $action == disable ]]; then
+        if platform_service_enabled main; then main_enabled=1; else
+            enabled_status=$?
+            [[ $enabled_status == 1 ]] || { xm_error '无法确认 Xray 开机状态，未改变服务。'; return 1; }
+        fi
+        if [[ -x $XM_EXTRA_BIN ]] && { [[ $action == disable ]] || protocol_has_extra "$XM_STATE"; }; then
+            include_extra=1
+            if platform_service_enabled extra; then extra_enabled=1; else
+                enabled_status=$?
+                [[ $enabled_status == 1 ]] || { xm_error '无法确认辅助核心开机状态，未改变服务。'; return 1; }
+            fi
+        fi
+    fi
     xm_service_call "$action" || failed=1
     if [[ $failed == 0 && ( $action == start || $action == restart ) ]]; then platform_health || failed=1; fi
     if [[ $failed == 0 && -x $XM_EXTRA_BIN ]]; then
@@ -561,36 +584,73 @@ xm_service() {
     fi
     if [[ $failed == 1 ]]; then
         if [[ $action == start || $action == restart || $action == stop ]]; then xm_services_restore_running "$main_running" "$extra_running" || xm_error '服务运行状态恢复失败，请诊断。'; fi
+        if [[ $action == enable || $action == disable ]]; then
+            if xm_services_restore_enabled "$main_enabled" "$extra_enabled" "$include_extra"; then
+                xm_warning '已恢复各核心原来的开机启动状态。'
+            else
+                xm_error '开机启动状态恢复未完成，请分别检查 Xray 和辅助核心。'
+            fi
+        fi
         xm_error '服务操作失败。'; return 1
     fi
-    xm_success "服务操作完成：$action（Xray 和已配置的辅助核心）。"
+    xm_success "服务操作完成：${action}（Xray 和已配置的辅助核心）。"
 }
 xm_logs() {
-    (($# <= 1)) || { xm_usage_error 'logs 最多接受一个行数。'; return 2; }
-    local lines=${1:-80}
+    (($# <= 2)) || { xm_usage_error 'logs 接受日志来源和行数。'; return 2; }
+    local lines=80 source=main
+    if (($# > 0)); then
+        case $1 in
+            main|extra|update|restart) source=$1; lines=${2:-80} ;;
+            *) (($# == 1)) || { xm_usage_error '格式：logs [main|extra|update|restart] [行数]。'; return 2; }; lines=$1 ;;
+        esac
+    fi
     [[ $lines =~ ^[0-9]+$ && ${#lines} -le 4 ]] && ((10#$lines >= 1 && 10#$lines <= 1000)) || { xm_usage_error '行数必须在 1..1000。'; return 2; }
-    xm_ready && platform_logs "$lines"
+    # Logs remain accessible when the node state is damaged or a first install
+    # failed; reading them must not depend on successful protocol validation.
+    xm_require_root && platform_detect || return 1
+    xm_owned "$XM_LOG" && xm_path_no_links "$XM_LOG" || { xm_error '日志目录不属于本项目。'; return 1; }
+    platform_logs "$lines" "$source"
 }
 xm_diagnose() {
     (($# == 0)) || { xm_usage_error 'diagnose 不接受参数。'; return 2; }
-    xm_ready && xm_work_begin && xm_private_temp || return 1
+    xm_require_root && xm_need_commands jq flock && platform_detect && xm_installed && xm_lock && xm_work_begin && xm_private_temp || return 1
+    local failed=0 state_ok=0 has_extra=0 core_info
     printf '系统：%s %s | 架构：%s | init：%s\n' "$XM_OS" "$XM_OS_VERSION" "$XM_ARCH" "$XM_INIT"
-    printf '状态核心：%s | 节点：%s\n' "$(jq -r .core_version "$XM_STATE")" "$(jq '.nodes|length' "$XM_STATE")"
-    "$XM_BIN" version | head -n 1
-    protocol_generate "$XM_STATE" "$XM_TEMP_DIR/check.json" && state_native_validate "$XM_BIN" "$XM_TEMP_DIR/check.json" || return 1
-    cmp -s "$XM_TEMP_DIR/check.json" "$XM_CONFIG" || { xm_error '生成配置与活跃配置不一致。'; return 1; }
-    xm_ok '状态与原生配置校验通过。'
-    platform_health || { xm_error '服务未运行或不健康。'; return 1; }
-    if protocol_has_extra "$XM_STATE"; then
-        protocol_generate_extra "$XM_STATE" "$XM_TEMP_DIR/check-extra.json" && state_extra_native_validate "$XM_TEMP_DIR/check-extra.json" && cmp -s "$XM_TEMP_DIR/check-extra.json" "$XM_EXTRA_CONFIG" && platform_extra_health || { xm_error '辅助核心配置或健康检查失败。'; return 1; }
+    if core_info=$("$XM_BIN" version); then printf '%s\n' "${core_info%%$'\n'*}"; else xm_error '无法读取 Xray 核心版本。'; failed=1; fi
+    if state_validate "$XM_STATE" maintenance; then
+        state_ok=1
+        printf '状态核心：%s | 节点：%s\n' "$(jq -r .core_version "$XM_STATE")" "$(jq '.nodes|length' "$XM_STATE")"
+        protocol_has_extra "$XM_STATE" && has_extra=1
+    else
+        xm_error '节点状态校验失败；继续检查各核心服务，跳过配置生成。'; failed=1
+        [[ ! -x $XM_EXTRA_BIN ]] || has_extra=1
     fi
-    xm_ok '服务健康检查通过。'
+    if [[ $state_ok == 1 ]]; then
+        if protocol_generate "$XM_STATE" "$XM_TEMP_DIR/check.json" && state_native_validate "$XM_BIN" "$XM_TEMP_DIR/check.json" && cmp -s "$XM_TEMP_DIR/check.json" "$XM_CONFIG"; then
+            xm_ok 'Xray 状态与原生配置校验通过。'
+        else xm_error 'Xray 配置校验失败或与活跃配置不一致。'; failed=1; fi
+    fi
+    if xm_service_call status >/dev/null 2>&1; then
+        if platform_health; then xm_ok 'Xray 服务健康。'; else xm_error 'Xray 服务运行中，但健康检查失败。'; failed=1; fi
+    else xm_info 'Xray 服务已停止（请确认是否为手动停止）。'; failed=1; fi
+    if [[ $has_extra == 1 ]]; then
+        if [[ $state_ok == 1 ]]; then
+            if protocol_generate_extra "$XM_STATE" "$XM_TEMP_DIR/check-extra.json" && state_extra_native_validate "$XM_TEMP_DIR/check-extra.json" && cmp -s "$XM_TEMP_DIR/check-extra.json" "$XM_EXTRA_CONFIG"; then
+                xm_ok '辅助核心状态与原生配置校验通过。'
+            else xm_error '辅助核心配置校验失败或与活跃配置不一致。'; failed=1; fi
+        fi
+        if xm_extra_service_call status >/dev/null 2>&1; then
+            if platform_extra_health; then xm_ok '辅助核心服务健康。'; else xm_error '辅助核心服务运行中，但健康检查失败。'; failed=1; fi
+        else xm_info '辅助核心服务已停止（请确认是否为手动停止）。'; failed=1; fi
+    fi
+    xm_temp_cleanup
+    return "$failed"
 }
 xm_backup() {
     (($# == 1)) || { xm_usage_error 'export 需要绝对文件路径。'; return 2; }
     [[ $1 == /* && $1 != */ ]] || { xm_usage_error '导出路径必须是绝对文件路径。'; return 2; }
     xm_ready && xm_path_no_links "$1" || return 1
-    (umask 077; set -o noclobber; cat "$XM_STATE" > "$1") || { xm_error '导出写入失败：目录须存在，目标文件须不存在。'; return 1; }
+    xm_export_snapshot "$XM_STATE" "$1" || { xm_error '导出写入失败：目录须存在，目标必须是尚不存在的普通文件。'; return 1; }
     xm_success "配置已导出：${1}；节点 $(jq '.nodes|length' "$XM_STATE")；权限 0600。"
     xm_warning '文件包含密码、私钥和证书，迁移完成后请妥善保管。'
 }
@@ -619,13 +679,24 @@ xm_restore() {
 }
 xm_uninstall() {
     (($# == 0)) || { xm_usage_error 'uninstall 不接受参数。'; return 2; }
-    xm_require_root && xm_need_commands jq flock && platform_detect && xm_installed && xm_lock || return 1
+    xm_require_root && xm_need_commands jq flock && platform_detect || return 1
+    # A failed first install may have no state/core. Only fully owned directory
+    # roots can reach the unchanged allowlist/resource/account/ledger preflight.
+    local directory
+    for directory in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do
+        xm_path_no_links "$directory" && xm_owned "$directory" || { xm_error '未发现安全的受管安装现场，拒绝卸载。'; return 1; }
+    done
+    xm_lock || return 1
     xm_warning '完全卸载将清除本项目目录、节点、日志、核心、服务、账户、xy 和已记录且不共享的新增依赖。外部导出与证书文件保留。'
     xm_confirm '确认完全卸载？' || return 2
     [[ $XM_TX_ACTIVE == 0 ]] || { xm_error '当前事务尚未完成，拒绝卸载并保留现场。'; return 1; }
     xm_temp_cleanup; xm_work_end
     platform_clean_uninstall_preflight || return 1
-    xm_service_call stop && xm_service_call disable || return 1
+    if [[ -z $XM_ROOT ]]; then
+        if [[ -e $(_platform_main_service_path) ]]; then xm_service_call stop && xm_service_call disable || return 1; fi
+    elif [[ -x $XM_BIN && -f $XM_STATE ]]; then
+        xm_service_call stop && xm_service_call disable || return 1
+    fi
     if [[ -x $XM_EXTRA_BIN ]]; then xm_extra_service_call stop && xm_extra_service_call disable || return 1; fi
     if [[ -n $XM_LOCK_FD ]]; then
         platform_restart_schedule disable {XM_LOCK_FD}>&- || return 1
@@ -880,6 +951,13 @@ xm_schedule() {
 xm_scheduled_restart() {
     (($# == 0)) || return 2
     xm_ready || return 1
+    local due_status=0
+    platform_restart_schedule_due || due_status=$?
+    case $due_status in
+        0) ;;
+        1) xm_info '定时重启已停用或已错过设定时间，跳过。'; return 0 ;;
+        *) xm_error '无法确认定时重启计划，未操作服务。'; return 1 ;;
+    esac
     local main_running=0 extra_running=0 failed=0
     xm_service_call status >/dev/null 2>&1 && main_running=1
     if [[ -x $XM_EXTRA_BIN ]]; then xm_extra_service_call status >/dev/null 2>&1 && extra_running=1; fi
@@ -1195,6 +1273,21 @@ xm_menu_system_info() {
         printf '  %s%-6s%s %s%s\n' "$XM_UI_BLUE" "$key" "$XM_UI_GREEN" "$value" "$XM_UI_RESET" >&2
     done <<< "$formatted"
 }
+xm_menu_logs() {
+    local XM_CHOICE source
+    xm_ui_heading '查看日志'
+    xm_ui_item 1 '主核日志'; xm_ui_item 2 '辅核日志'
+    xm_ui_item 3 '更新日志'; xm_ui_item 4 '重启日志'; xm_ui_item 0 '返回'
+    while :; do
+        xm_read XM_CHOICE '选择日志来源' 1 || return 2
+        case $XM_CHOICE in
+            0) return 0 ;; 1) source=main; break ;; 2) source=extra; break ;;
+            3) source=update; break ;; 4) source=restart; break ;;
+            *) xm_error '请输入 0..4。' ;;
+        esac
+    done
+    xm_dispatch logs "$source"
+}
 xm_menu_render() {
     local version='未安装' count=0 status='未运行' width status_color=$XM_UI_YELLOW
     width=$(xm_terminal_width)
@@ -1248,7 +1341,7 @@ xm_menu() {
             8) xm_menu_node delete ;;
             9) xm_menu_node share ;;
             10) xm_menu_service ;;
-            11) xm_dispatch logs ;;
+            11) xm_menu_logs ;;
             12) xm_dispatch diagnose ;;
             13) xm_menu_ready && xm_read XM_FILE '导出配置绝对路径' "/root/xray-manager-export-$(date +%Y%m%d-%H%M%S).json" && xm_dispatch export "$XM_FILE" ;;
             14) xm_menu_ready && xm_read XM_FILE '导入配置绝对路径' '' '选择已有导出文件；:q 取消' && xm_dispatch import "$XM_FILE" ;;

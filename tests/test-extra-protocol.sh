@@ -65,6 +65,8 @@ reject protocol_validate_node "$(cat "$scratch/future.json")"
 protocol_validate_node "$(cat "$scratch/future.json")" maintenance
 # Two existing expired nodes can be generated only in explicit maintenance.
 jq -n --slurpfile n "$scratch/expired.json" '{schema_version:1,nodes:[$n[0],($n[0]|.id="another"|.name="another"|.port=25006)]}' > "$scratch/expired-state.json"
+reject protocol_validate_nodes "$scratch/expired-state.json" strict
+protocol_validate_nodes "$scratch/expired-state.json" maintenance
 reject protocol_generate "$scratch/expired-state.json" "$scratch/expired-xray.json"
 reject protocol_generate_extra "$scratch/expired-state.json" "$scratch/expired-extra.json"
 protocol_generate "$scratch/expired-state.json" "$scratch/expired-xray.json" maintenance
@@ -72,6 +74,7 @@ protocol_generate_extra "$scratch/expired-state.json" "$scratch/expired-extra.js
 reject protocol_generate "$scratch/expired-state.json" "$scratch/invalid.json" invalidmode
 reject protocol_generate_extra "$scratch/expired-state.json" "$scratch/invalid.json" invalidmode
 jq '.nodes[1].sni="bad.example"' "$scratch/expired-state.json" > "$scratch/invalid-state.json"
+reject protocol_validate_nodes "$scratch/invalid-state.json" maintenance
 reject protocol_generate "$scratch/invalid-state.json" "$scratch/invalid.json" maintenance
 reject protocol_generate_extra "$scratch/invalid-state.json" "$scratch/invalid.json" maintenance
 printf 'PASS strict rejects expired/future TLS; explicit maintenance retains SAN/key validation and multi-node generation\n'
