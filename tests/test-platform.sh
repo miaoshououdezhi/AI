@@ -56,6 +56,8 @@ grep -q '不接受参数' "$TEST_ROOT/failure.stderr" || fail 'system update acc
 
 run_system_update_stub() (
     # Permit the fixture root only here, after testing the production guard.
+    # Pin the inherited frontend so CI runner environment cannot change assertions.
+    DEBIAN_FRONTEND=interactive
     _platform_real() { printf 'real-check\n' >> "$TEST_ROOT/update-gates"; return "${TEST_REAL_STATUS:-0}"; }
     apt-get() {
         printf 'apt-get:%s:frontend=%s\n' "$*" "${DEBIAN_FRONTEND:-}" >> "$TEST_ROOT/update-commands"
@@ -85,7 +87,7 @@ for fixture in 'debian 12' 'debian 13' 'alpine 3.23.4' 'alpine 3.24.0'; do
     TEST_FAIL_STAGE='' run_system_update_stub || fail "$id system update failed with package stubs"
     [[ $(cat "$TEST_ROOT/update-gates") == real-check ]] || fail "$id did not run real/root guard first"
     if [[ $id == debian ]]; then
-        [[ $(cat "$TEST_ROOT/update-commands") == $'apt-get:--error-on=any update:frontend=\napt-get:upgrade --with-new-pkgs -y:frontend=noninteractive' ]] || fail 'Debian update command order or flags'
+        [[ $(cat "$TEST_ROOT/update-commands") == $'apt-get:--error-on=any update:frontend=interactive\napt-get:upgrade --with-new-pkgs -y:frontend=noninteractive' ]] || fail "Debian update command order or flags: $(cat "$TEST_ROOT/update-commands")"
         grep -q 'apt stdout: upgrade --with-new-pkgs -y' "$TEST_ROOT/update.stdout" || fail 'Debian stdout hidden'
         grep -q 'apt stderr: upgrade --with-new-pkgs -y' "$TEST_ROOT/update.stderr" || fail 'Debian stderr hidden'
     else
@@ -111,7 +113,7 @@ for fixture in 'debian 12' 'debian 13' 'alpine 3.23.4' 'alpine 3.24.0'; do
         : > "$TEST_ROOT/update-commands"
         if TEST_FAIL_STAGE=strict-update run_system_update_stub; then fail 'Debian partial index failure returned success'; else result=$?; fi
         [[ $result -eq 100 ]] || fail 'Debian partial index failure exit status lost'
-        [[ $(cat "$TEST_ROOT/update-commands") == 'apt-get:--error-on=any update:frontend=' ]] || fail 'Debian upgraded after a partial index failure'
+        [[ $(cat "$TEST_ROOT/update-commands") == 'apt-get:--error-on=any update:frontend=interactive' ]] || fail 'Debian upgraded after a partial index failure'
         grep -q 'Failed to fetch fixture repository index' "$TEST_ROOT/update.stderr" || fail 'Debian repository failure output hidden'
         grep -q 'APT 软件包索引更新失败（退出码 100）' "$TEST_ROOT/update.stderr" || fail 'Debian strict index failure stage hidden'
     fi
