@@ -245,6 +245,30 @@ xm_node_unique_secrets "$TEST_SECOND_XHTTP" || fail 'independent random keys rej
 state_empty v26.3.27 > "$XM_STATE"
 pass 'XHTTP REALITY defaults validate, change per request and reject reused path/credentials'
 
+# New-node defaults must reach the dispatcher and real protocol validation,
+# while an existing node and its edit defaults retain the user's chosen SNI.
+for TEST_PROTOCOL_CHOICE in 1 2; do
+    printf '%s\n\n\n\n\n\n\n\n' "$TEST_PROTOCOL_CHOICE" > "$TEST_ROOT/input"
+    xm_menu_add < "$TEST_ROOT/input" >/dev/null 2> "$TEST_ROOT/default-sni.log" || fail 'default SNI interaction'
+    jq -e '.[6]=="genshin.hoyoverse.com" and .[7]=="genshin.hoyoverse.com:443"' "$TEST_CALL" >/dev/null || fail 'default SNI or target differs'
+    grep -Fq '[genshin.hoyoverse.com]' "$TEST_ROOT/default-sni.log" || fail 'default SNI prompt differs'
+    mapfile -t TEST_ARGS < <(jq -r '.[]' "$TEST_CALL")
+    TEST_DEFAULT_SNI_NODE=$(protocol_new "${TEST_ARGS[@]:1}") || fail 'default SNI node invalid'
+    jq -e '.sni=="genshin.hoyoverse.com" and .target=="genshin.hoyoverse.com:443"' <<< "$TEST_DEFAULT_SNI_NODE" >/dev/null || fail 'validated default SNI differs'
+    TEST_EXISTING_SNI_NODE=$(jq -c '.sni="www.example.com" | .target="www.example.com:443" | .port=26003' <<< "$TEST_DEFAULT_SNI_NODE")
+    jq --argjson node "$TEST_EXISTING_SNI_NODE" '.nodes=[$node]' "$XM_STATE" > "$TEST_ROOT/state.new"
+    mv "$TEST_ROOT/state.new" "$XM_STATE"
+    cp "$XM_STATE" "$TEST_ROOT/existing-sni-state"
+    rm -f "$TEST_CALL"
+    printf '\n' > "$TEST_ROOT/input"
+    xm_menu_edit "$TEST_EXISTING_SNI_NODE" sni < "$TEST_ROOT/input" >/dev/null 2> "$TEST_ROOT/existing-sni.log" || fail 'existing SNI Enter interaction'
+    [[ ! -e $TEST_CALL ]] || fail 'existing SNI Enter dispatched a mutation'
+    grep -Fq '[www.example.com]' "$TEST_ROOT/existing-sni.log" || fail 'existing SNI edit replaced current default'
+    cmp -s "$XM_STATE" "$TEST_ROOT/existing-sni-state" || fail 'existing SNI state changed'
+    state_empty v26.3.27 > "$XM_STATE"
+done
+pass 'REALITY and XHTTP default to genshin.hoyoverse.com:443, while existing SNI and edit Enter are preserved'
+
 # One SNI prompt automatically selects and validates the target for both types.
 for TEST_PROTOCOL_CHOICE in 1 2; do
     printf '%s\n\n\n\n8.8.4.4\nwww.example.com\n\n\n' "$TEST_PROTOCOL_CHOICE" > "$TEST_ROOT/input"

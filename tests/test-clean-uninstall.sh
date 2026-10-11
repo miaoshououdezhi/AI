@@ -45,7 +45,7 @@ mkdir -p "$tmp/mockbin"
 export TEST_CLEAN_FIXTURE=$tmp
 cat > "$tmp/mockbin/dpkg-query" <<'MOCK'
 #!/bin/sh
-case "$*" in *Essential*) printf 'bash\tyes\na\tno\nb\tno\nz\tno\n' ;; *) printf 'bash\tinstalled\na\tinstalled\nb\tinstalled\nz\tinstalled\n' ;; esac
+case "$*" in *Essential*) printf 'bash\tyes\na\tno\nb\tno\nz\tno\n' ;; *) printf 'bash\tinstalled\na\tinstalled\nb\tinstalled\nz\tinstalled\n'; [ ! -f "$TEST_CLEAN_FIXTURE/debian-extra-installed" ] || printf 'c\tinstalled\n' ;; esac
 MOCK
 cat > "$tmp/mockbin/apt-cache" <<'MOCK'
 #!/bin/sh
@@ -67,6 +67,10 @@ printf '{"owner":"xray-manager:1","os":"debian","baseline":["bash","z"],"added":
 [[ $(_platform_dependency_plan "$tmp/ledger.json") == a ]] || fail 'shared/baseline package plan'
 touch "$tmp/bad-simulation"
 reject _platform_dependency_plan "$tmp/ledger.json"
+(
+    export PYTHONOPTIMIZE=1
+    reject _platform_dependency_plan "$tmp/ledger.json"
+)
 [[ ! -e $tmp/purge-invocation ]] || fail 'simulation failure mutated packages'
 rm "$tmp/bad-simulation"
 # Explicit fixture overrides: verify mutation argv without invoking a real manager.
@@ -74,9 +78,111 @@ _platform_real() { return 0; }
 platform_detect() { XM_OS=debian; }
 platform_dependency_cleanup "$tmp/ledger.json"
 [[ $(cat "$tmp/purge-invocation") == '--no-auto-remove purge -y -- a' ]] || fail 'purge exceeded ledger or used autoremove'
+touch "$tmp/debian-extra-installed"
+printf '{"owner":"xray-manager:1","os":"debian","baseline":["bash","z"],"added":["a","c"]}\n' > "$tmp/debian-request-ledger.json"
+[[ $(_platform_dependency_plan "$tmp/debian-request-ledger.json") == $'a\nc' ]] || fail 'Debian plan changed simulated request argv'
+platform_dependency_cleanup "$tmp/debian-request-ledger.json"
+[[ $(cat "$tmp/purge-invocation") == '--no-auto-remove purge -y -- a c' ]] || fail 'Debian cleanup argv differed from simulation'
+rm "$tmp/debian-extra-installed"
 printf '{"owner":"foreign","os":"debian","baseline":[],"added":["a"]}\n' > "$tmp/bad-ledger.json"
 reject _platform_dependency_plan "$tmp/bad-ledger.json"
+(
+    export PYTHONOPTIMIZE=1
+    reject _platform_dependency_plan "$tmp/bad-ledger.json"
+)
 printf 'PASS: complete own-file cleanup, unknown/symlink/export protection, package ledger/baseline/reverse dependency and simulation boundaries\n'
+
+# Alpine apk del prunes unused dependencies even when they are absent from its
+# argv. The plan must preserve an externally needed dependency by retaining
+# its world anchor, then execute the exact safe argv that was simulated.
+(
+    cat > "$tmp/mockbin/apk" <<'MOCK'
+#!/bin/sh
+case "$1:$2" in
+    info:)
+        printf 'base\nanchor\ndep\nretained\nsafe\n' ;;
+    info:--rdepends)
+        printf '%s-1 is required by:\n' "$3"
+        [ "$3" != retained ] || printf 'base-1\n' ;;
+    del:--simulate)
+        shift 3
+        if [ -f "$TEST_CLEAN_FIXTURE/apk-fail" ]; then exit 93; fi
+        if [ -f "$TEST_CLEAN_FIXTURE/apk-install" ]; then printf '(1/1) Installing foreign (1)\n'; exit 0; fi
+        if [ -f "$TEST_CLEAN_FIXTURE/apk-upgrade" ]; then printf '(1/1) Upgrading foreign (1)\n'; exit 0; fi
+        if [ -f "$TEST_CLEAN_FIXTURE/apk-unknown-action" ]; then printf '(1/1) Replacing safe (1)\n'; exit 0; fi
+        if [ -f "$TEST_CLEAN_FIXTURE/apk-unknown-package" ]; then printf '(1/1) Purging foreign (1)\n'; exit 0; fi
+        if [ -f "$TEST_CLEAN_FIXTURE/apk-baseline" ]; then printf '(1/1) Purging base (1)\n'; exit 0; fi
+        if [ -f "$TEST_CLEAN_FIXTURE/apk-drift" ] && [ "$*" = 'dep safe' ]; then
+            if [ -f "$TEST_CLEAN_FIXTURE/apk-drift-seen" ]; then
+                printf '(1/2) Purging dep (1)\n(2/2) Purging safe (1)\n'
+                exit 0
+            fi
+            : > "$TEST_CLEAN_FIXTURE/apk-drift-seen"
+        fi
+        for package do
+            case $package in
+                anchor) printf '(1/2) Purging anchor (1)\n(2/2) Purging retained (1)\n' ;;
+                safe) printf '(1/1) Purging safe (1)\n' ;;
+            esac
+        done ;;
+    del:--)
+        shift 2
+        printf '%s\n' "$*" > "$TEST_CLEAN_FIXTURE/apk-delete-invocation" ;;
+    *) exit 90 ;;
+esac
+MOCK
+    chmod 0755 "$tmp/mockbin/apk"
+    export XM_OS=alpine
+    printf '{"owner":"xray-manager:1","os":"alpine","baseline":["base"],"added":["anchor","dep","retained","safe"]}\n' > "$tmp/alpine-ledger.json"
+    _platform_real() { return 0; }
+    platform_detect() { XM_OS=alpine; }
+    plan=$(_platform_dependency_plan "$tmp/alpine-ledger.json" 2> "$tmp/alpine-plan.stderr") || fail 'Alpine safe subset rejected'
+    [[ $plan == $'dep\nsafe' ]] || fail "Alpine plan did not preserve protected dependency: $plan"
+    grep -q 'anchor, dep, retained' "$tmp/alpine-plan.stderr" || fail 'Alpine retained packages not reported'
+    platform_dependency_cleanup "$tmp/alpine-ledger.json" || fail 'Alpine safe subset cleanup failed'
+    [[ $(cat "$tmp/apk-delete-invocation") == 'dep safe' ]] || fail 'Alpine cleanup argv differed from verified plan'
+    for bad in apk-fail apk-install apk-upgrade apk-unknown-action apk-unknown-package; do
+        touch "$tmp/$bad"
+        reject _platform_dependency_plan "$tmp/alpine-ledger.json"
+        if [[ $bad == apk-unknown-action ]]; then
+            (export PYTHONOPTIMIZE=1; reject _platform_dependency_plan "$tmp/alpine-ledger.json")
+        fi
+        rm "$tmp/$bad"
+    done
+    touch "$tmp/apk-drift"
+    reject _platform_dependency_plan "$tmp/alpine-ledger.json"
+    rm "$tmp/apk-drift" "$tmp/apk-drift-seen"
+    touch "$tmp/apk-baseline"
+    [[ -z $(_platform_dependency_plan "$tmp/alpine-ledger.json") ]] || fail 'Alpine baseline deletion was accepted'
+    rm "$tmp/apk-baseline"
+    rm "$tmp/apk-delete-invocation"
+    (
+        _platform_dependency_plan() {
+            if [[ -e $tmp/recheck-seen ]]; then return 1; fi
+            : > "$tmp/recheck-seen"
+            printf 'safe\n'
+        }
+        reject platform_dependency_cleanup "$tmp/alpine-ledger.json"
+    )
+    [[ ! -e $tmp/apk-delete-invocation ]] || fail 'Alpine cleanup ignored failed immediate recheck'
+)
+printf 'PASS: Alpine simulated safe request subset, protected orphan retention and exact cleanup argv\n'
+
+# Optimized Python must not adopt or overwrite a foreign dependency ledger.
+(
+    export PYTHONOPTIMIZE=1
+    XM_ETC=$tmp/record-etc
+    mkdir -p "$XM_ETC"
+    printf '{"owner":"foreign","os":"debian","baseline":["a"],"added":[]}\n' > "$XM_ETC/dependency-ledger.json"
+    cp "$XM_ETC/dependency-ledger.json" "$tmp/foreign-ledger-before"
+    _platform_paths() { return 0; }
+    _platform_owned_dir() { return 0; }
+    _platform_package_inventory() { printf '{"os":"debian","packages":["a","b"]}\n'; }
+    _XM_DEPENDENCY_BEFORE='{"os":"debian","packages":["a"]}'
+    reject _platform_dependency_record
+    cmp "$XM_ETC/dependency-ledger.json" "$tmp/foreign-ledger-before" || fail 'optimized Python overwrote foreign dependency ledger'
+)
+printf 'PASS: optimized Python rejects foreign dependency ledger without overwrite\n'
 
 # Alpine adduser legitimately includes its own account in the dedicated group.
 # Simulate passwd/group/process queries; do not inspect or delete host accounts.
