@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# xray-manager-owned:1
+# shellcheck shell=sh disable=SC2034
+description="Xray Manager private system update scheduler"
+supervisor="supervise-daemon"
+command="/usr/bin/python3"
+command_args="/opt/xray-manager/assets/xray-manager-system-update.py"
+pidfile="/run/xray-manager-system-update.pid"
+output_log="/var/log/xray-manager/system-update-schedule.log"
+error_log="/var/log/xray-manager/system-update-schedule.log"
+respawn_delay=3
+respawn_max=5
+respawn_period=60
+retry="TERM/155/KILL/5"
+umask=0077
+
+depend() {
+    need localmount
+    after clock
+}
+
+start_pre() {
+    [ ! -L "$pidfile" ] && { [ ! -e "$pidfile" ] || [ -f "$pidfile" ]; } || return 1
+    [ -f /etc/xray-manager/system-update-schedule ] && [ ! -L /etc/xray-manager/system-update-schedule ] || return 1
+    [ -f /opt/xray-manager/assets/xray-manager-system-update.py ] && [ ! -L /opt/xray-manager/assets/xray-manager-system-update.py ] || return 1
+    checkpath --file --owner root:root --mode 0600 "$output_log" || return 1
+}

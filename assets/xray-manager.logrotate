@@ -11,3 +11,16 @@
     create 0640 root xray-manager
     su root xray-manager
 }
+
+/var/log/xray-manager/system-update-schedule.log {
+    daily
+    maxsize 10M
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 0600 root root
+    su root root
+}

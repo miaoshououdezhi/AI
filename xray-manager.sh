@@ -36,6 +36,10 @@ xray-manager — Xray 中文交互管理
   install [v版本]                 安装，默认 v26.3.27；重复安装保留节点
   update-manager                 获取项目 main 的最新管理脚本（保留核心/节点）
   update-system                  更新当前 Debian/Alpine 软件包，需要确认或 --yes
+  system-update-schedule status 查看系统包定时更新状态
+  system-update-schedule set daily|weekly|monthly HH:MM
+                                 按本机时区设置计划，需要确认或 --yes
+  system-update-schedule disable 改为仅手动更新，需要确认或 --yes
   upgrade v版本                  指定核心版本升级，保留上一版供回退
   rollback                       切换到上一版核心
   list                           列出节点（不显示秘密）
@@ -93,7 +97,7 @@ xm_install_code() {
         mkdir -p -- "$XM_HOME/$file" || return 1
         chmod 0750 "$XM_HOME/$file" || return 1
     done
-    for file in xray-manager.sh install.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc; do
+    for file in xray-manager.sh install.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xray-manager-system-update.service assets/xray-manager-system-update.timer assets/xray-manager-system-update.openrc assets/xray-manager-system-update.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc; do
         [[ -f $XM_CODE_ROOT/$file ]] || { xm_error "程序文件缺失：$file"; return 1; }
         xm_atomic_copy "$XM_CODE_ROOT/$file" "$XM_HOME/$file" 0755 || return 1
     done
@@ -120,7 +124,8 @@ xm_retire_trojan() {
 }
 
 xm_install() {
-    local version=${1:-$XM_DEFAULT_CORE_VERSION} refresh_extra=0
+    local version=${1:-$XM_DEFAULT_CORE_VERSION} refresh_extra=0 asset target install_failed=0 cleanup_failed=0
+    local -a added_schedule_assets=()
     (($# <= 1)) || { xm_usage_error 'install 最多接受一个版本参数。'; return 2; }
     xm_version_valid "$version" || return $?
     xm_require_root && platform_detect && platform_shortcut_preflight && platform_dependencies_snapshot && platform_dependencies && platform_prepare && xm_lock || return 1
@@ -130,10 +135,26 @@ xm_install() {
             platform_extra_ensure && platform_extra_preflight || return 1
             refresh_extra=1
         fi
-        xm_retire_trojan && xm_install_code && platform_install_service || return 1
+        # Old installed updaters cannot snapshot assets introduced by this
+        # release. If registration fails, remove only assets first created by
+        # this attempt before that updater restores its known code files.
+        for asset in xray-manager-system-update.service xray-manager-system-update.timer xray-manager-system-update.openrc xray-manager-system-update.py; do
+            target="$XM_HOME/assets/$asset"
+            [[ -e $target || -L $target ]] || added_schedule_assets+=("$asset")
+        done
+        xm_retire_trojan && xm_install_code && platform_install_service || install_failed=1
         # Re-register owned service definitions without start/enable actions.
-        if [[ $refresh_extra == 1 ]]; then platform_extra_install_service || return 1; fi
-        platform_shortcut_install || return 1
+        if [[ $install_failed == 0 && $refresh_extra == 1 ]]; then platform_extra_install_service || install_failed=1; fi
+        if [[ $install_failed == 0 ]]; then platform_shortcut_install || install_failed=1; fi
+        if [[ $install_failed == 1 ]]; then
+            for asset in "${added_schedule_assets[@]}"; do
+                target="$XM_HOME/assets/$asset"
+                [[ -e $target || -L $target ]] || continue
+                xm_path_no_links "$target" && [[ -f $target ]] && _platform_owned_file "$target" && cmp -s "$XM_CODE_ROOT/assets/$asset" "$target" && rm -f -- "$target" || cleanup_failed=1
+            done
+            [[ $cleanup_failed == 0 ]] || xm_error '安装失败，部分本次新增的系统更新计划资产未能安全清理，请检查受管目录。'
+            return 1
+        fi
         xm_success "已安装核心 $(jq -r .core_version "$XM_STATE")；保留节点。更换核心请使用 upgrade。入口：xy。"
         return 0
     fi
@@ -606,7 +627,13 @@ xm_uninstall() {
     platform_clean_uninstall_preflight || return 1
     xm_service_call stop && xm_service_call disable || return 1
     if [[ -x $XM_EXTRA_BIN ]]; then xm_extra_service_call stop && xm_extra_service_call disable || return 1; fi
-    if [[ -n $XM_LOCK_FD ]]; then platform_restart_schedule disable {XM_LOCK_FD}>&- || return 1; else platform_restart_schedule disable || return 1; fi
+    if [[ -n $XM_LOCK_FD ]]; then
+        platform_restart_schedule disable {XM_LOCK_FD}>&- || return 1
+        platform_system_update_schedule disable {XM_LOCK_FD}>&- || return 1
+    else
+        platform_restart_schedule disable || return 1
+        platform_system_update_schedule disable || return 1
+    fi
     platform_clean_uninstall || return 1
     xm_success '完全卸载完成；用户外部导出和证书保留。'
 }
@@ -622,7 +649,7 @@ xm_update_manager() (
     xm_ready && xm_need_commands curl sha256sum head sh || return 1
     local executing=0 preserve_backup=0
     local update_dir ref_sha runtime_sha file code_state core_digest before_state restore_failed=0
-    local -a code_files=(xray-manager.sh install.sh deploy.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc)
+    local -a code_files=(xray-manager.sh install.sh deploy.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xray-manager-system-update.service assets/xray-manager-system-update.timer assets/xray-manager-system-update.openrc assets/xray-manager-system-update.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc)
     update_dir=$(mktemp -d) || return 1
     chmod 0700 "$update_dir" || { rm -rf -- "$update_dir"; return 1; }
     trap 'if [[ $preserve_backup == 0 ]]; then rm -rf -- "$update_dir"; fi; xm_unlock' EXIT
@@ -695,8 +722,60 @@ xm_update_system() {
     esac
     xm_warning '仅升级当前软件仓库中的软件包；升级可能重启服务或需要稍后重启机器。脚本不会自动重启机器，系统包变更无法通用回滚。'
     xm_confirm '确认更新系统软件包？' || return 2
+    # A managed installation shares this lock with scheduled updates and all
+    # other manager mutations. Before installation there is no managed lock
+    # directory; the platform's package-update lock still serializes runs.
+    if [[ -e $XM_ETC || -L $XM_ETC ]]; then
+        xm_owned "$XM_ETC" || { xm_error '系统更新锁目录不是本项目受管目录，拒绝继续。'; return 1; }
+        xm_lock || return 1
+    fi
     platform_system_update || return $?
     xm_success '系统软件包更新完成。'
+}
+
+xm_system_update_schedule() {
+    local action=${1:-} period=${2:-} time=${3:-}
+    case $action in
+        status|disable) (($# == 1)) || { xm_usage_error 'system-update-schedule status/disable 不接受其他参数。'; return 2; } ;;
+        set)
+            (($# == 3)) && [[ $period == daily || $period == weekly || $period == monthly ]] && [[ $time =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || {
+                xm_usage_error '格式：system-update-schedule set daily|weekly|monthly HH:MM（00:00..23:59）。'; return 2;
+            } ;;
+        *) xm_usage_error 'system-update-schedule 仅支持 status、set PERIOD HH:MM 或 disable。'; return 2 ;;
+    esac
+    xm_require_root || return 1
+    [[ -z $XM_ROOT ]] || { xm_error 'XM_ROOT 隔离模式禁止修改宿主定时任务。'; return 1; }
+    if [[ $action == status ]]; then platform_detect && platform_system_update_schedule status; return $?; fi
+    xm_ready || return 1
+    if [[ $action == set ]]; then
+        local description
+        case $period in daily) description='每天' ;; weekly) description='每周一' ;; monthly) description='每月 1 日' ;; esac
+        xm_warning '计划任务将自动升级当前软件仓库的软件包；升级可能重启服务或需要稍后重启机器，不会自动重启机器，也无法通用回滚。'
+        xm_confirm "确认按本机时区${description} ${time} 自动更新系统软件包？" || return 2
+    elif [[ $action == disable ]]; then
+        xm_confirm '禁用系统软件包定时更新，改为仅手动执行？' || return 2
+    fi
+    # The OpenRC scheduler must not inherit the manager lock permanently.
+    if [[ -n $XM_LOCK_FD ]]; then platform_system_update_schedule "$@" {XM_LOCK_FD}>&-; else platform_system_update_schedule "$@"; fi
+}
+
+xm_scheduled_system_update() {
+    (($# == 0)) || { xm_usage_error 'scheduled-system-update 不接受参数。'; return 2; }
+    xm_require_root || return 1
+    [[ -z $XM_ROOT ]] || { xm_error 'XM_ROOT 隔离模式禁止更新宿主系统软件包。'; return 1; }
+    xm_ready || return 1
+    local schedule enabled period time timezone next due
+    schedule=$(platform_system_update_schedule status) || return 1
+    IFS=$'\t' read -r enabled period time timezone next <<< "$schedule"
+    [[ $enabled == enabled ]] || { xm_error '系统软件包定时更新未启用，拒绝无确认执行。'; return 1; }
+    due=$(platform_system_update_schedule_due "$period" "$time") || return 1
+    case $due in
+        due) ;;
+        not-due) xm_info '当前计划时段未到或已错过，跳过系统软件包更新。'; return 0 ;;
+        *) xm_error '系统软件包定时更新到期判断结果无效，拒绝执行。'; return 1 ;;
+    esac
+    platform_system_update || return $?
+    xm_success '定时系统软件包更新完成。'
 }
 
 xm_dispatch() {
@@ -708,6 +787,8 @@ xm_dispatch() {
         upgrade) xm_upgrade "$@" ;;
         update-manager) xm_update_manager "$@" ;;
         update-system) xm_update_system "$@" ;;
+        system-update-schedule) xm_system_update_schedule "$@" ;;
+        scheduled-system-update) xm_scheduled_system_update "$@" ;;
         rollback) xm_rollback "$@" ;;
         list) xm_list "$@" ;;
         add) xm_add "$@" ;;
@@ -832,6 +913,46 @@ xm_menu_schedule() {
                 done
                 xm_dispatch schedule set "$XM_TIME"; return $? ;;
             *) xm_error '请输入 0、1 或 2。' ;;
+        esac
+    done
+}
+
+xm_menu_system_update() {
+    local row enabled period time timezone next XM_CHOICE XM_TIME label description
+    xm_ui_heading '系统更新'
+    row=$(xm_dispatch system-update-schedule status) || return 1
+    IFS=$'\t' read -r enabled period time timezone next <<< "$row"
+    case $period in
+        manual) [[ $enabled == disabled ]] || { xm_error '系统更新计划状态无效。'; return 1; }; label='不定时（仅手动）' ;;
+        daily|weekly|monthly)
+            case $period in daily) description='每天' ;; weekly) description='每周一' ;; monthly) description='每月 1 日' ;; esac
+            case $enabled in
+                enabled) label="${description} ${time}（本机时区 ${timezone}）" ;;
+                disabled) label="已配置${description} ${time}，任务未运行"; xm_warning '请重新设置系统更新计划，或查看专属调度日志。' ;;
+                *) xm_error '系统更新计划状态无效。'; return 1 ;;
+            esac ;;
+        *) xm_error '系统更新计划格式无效。'; return 1 ;;
+    esac
+    xm_info "当前计划：$label"
+    if [[ $enabled == enabled && $next != - && -n $next ]]; then xm_info "下次执行：$next"; fi
+    xm_info '计划任务按本机时区执行，不补跑错过的任务；首次安装默认不定时。'
+    xm_ui_item 1 '立即更新'; xm_ui_item 2 '每天更新'; xm_ui_item 3 '每周更新'
+    xm_ui_item 4 '每月更新'; xm_ui_item 5 '不定时（仅手动）'; xm_ui_item 0 '返回'
+    while :; do
+        xm_read XM_CHOICE '选择操作' '0' || return 2
+        case $XM_CHOICE in
+            0) return 0 ;;
+            1) xm_dispatch update-system; return $? ;;
+            5) xm_dispatch system-update-schedule disable; return $? ;;
+            2|3|4)
+                case $XM_CHOICE in 2) period=daily; description='每天' ;; 3) period=weekly; description='每周一' ;; 4) period=monthly; description='每月 1 日' ;; esac
+                while :; do
+                    xm_read XM_TIME "${description}更新时间（24小时 HH:MM）" '04:00' || return 2
+                    [[ $XM_TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] && break
+                    xm_error '请输入 00:00..23:59，小时和分钟均须两位。'
+                done
+                xm_dispatch system-update-schedule set "$period" "$XM_TIME"; return $? ;;
+            *) xm_error '请输入 0..5。' ;;
         esac
     done
 }
@@ -1121,7 +1242,7 @@ xm_menu() {
             2) xm_menu_upgrade ;;
             3) xm_dispatch rollback ;;
             4) xm_dispatch update-manager && return 0 ;;
-            5) xm_dispatch update-system ;;
+            5) xm_menu_system_update ;;
             6) xm_menu_node view ;;
             7) xm_menu_add ;;
             8) xm_menu_node delete ;;

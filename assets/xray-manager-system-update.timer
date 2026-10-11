@@ -1,0 +1,12 @@
+# xray-manager-owned:1
+[Unit]
+Description=Xray Manager scheduled system package update
+
+[Timer]
+OnCalendar=@CALENDAR@
+AccuracySec=1s
+Persistent=false
+Unit=xray-manager-system-update.service
+
+[Install]
+WantedBy=timers.target

@@ -246,3 +246,62 @@ pass 'retirement validates supported nodes, preserves private original backup, r
     [[ $(wc -l < "$ROOT/validation-calls") == 128 ]] || fail 'normal nodes lost complete protocol validation'
 ) || fail 'early state boundary fixture'
 pass 'single document/object/128-node/duplicate checks precede complete protocol validation'
+
+# A pre-schedule installed manager's updater cannot know the four new asset
+# names. A failed repeat install must remove only assets created in this run
+# before that updater restores the older code files.
+(
+    export XM_ROOT="$ROOT/schedule-asset-rollback"
+    # shellcheck disable=SC1090
+    source "$REPO/lib/common.sh"
+    # shellcheck disable=SC1090
+    source "$REPO/lib/platform.sh"
+    export XM_CODE_ROOT="$REPO"
+    mkdir -p "$XM_HOME/bin" "$XM_HOME/assets" "$XM_ETC" "$XM_DATA" "$XM_LOG"
+    for directory in "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG"; do printf 'xray-manager:1\n' > "$directory/.xray-manager-owned"; done
+    printf '#!/bin/sh\nexit 0\n' > "$XM_BIN"; chmod 0755 "$XM_BIN"
+    state_empty v26.3.27 > "$XM_STATE"
+    printf '{}\n' > "$XM_CONFIG"
+    cp "$XM_STATE" "$ROOT/asset-old-state"
+    cp "$XM_BIN" "$ROOT/asset-old-core"
+    cp "$REPO/assets/xray-manager-system-update.service" "$XM_HOME/assets/xray-manager-system-update.service"
+    cp "$XM_HOME/assets/xray-manager-system-update.service" "$ROOT/preexisting-update-service"
+    # shellcheck disable=SC1090
+    source <(sed -n '/^xm_install_code() {/,/^}/p; /^xm_install() {/,/^}/p' "$REPO/xray-manager.sh") || fail 'schedule rollback helpers'
+    # Keep the actual code-copy implementation for service/shortcut failures.
+    # shellcheck disable=SC1090
+    source <(declare -f xm_install_code | sed '1s/^xm_install_code ()/xm_install_code_real ()/')
+    xm_install_code() {
+        if [[ $MOCK_INSTALL_FAILURE == copy ]]; then
+            local asset
+            for asset in xray-manager-system-update.timer xray-manager-system-update.openrc xray-manager-system-update.py; do
+                cp "$REPO/assets/$asset" "$XM_HOME/assets/$asset" || return 1
+            done
+            return 1
+        fi
+        xm_install_code_real
+    }
+    xm_version_valid() { return 0; }
+    platform_detect() { return 0; }
+    platform_shortcut_preflight() { return 0; }
+    platform_dependencies_snapshot() { return 0; }
+    platform_dependencies() { return 0; }
+    platform_prepare() { return 0; }
+    xm_retire_trojan() { return 0; }
+    platform_install_service() { [[ $MOCK_INSTALL_FAILURE != service ]]; }
+    platform_shortcut_install() { [[ $MOCK_INSTALL_FAILURE != shortcut ]]; }
+    local_asset_check() {
+        local asset
+        cmp "$XM_HOME/assets/xray-manager-system-update.service" "$ROOT/preexisting-update-service" || fail 'preexisting schedule asset removed'
+        for asset in xray-manager-system-update.timer xray-manager-system-update.openrc xray-manager-system-update.py; do
+            [[ ! -e $XM_HOME/assets/$asset && ! -L $XM_HOME/assets/$asset ]] || fail "new schedule asset retained after $MOCK_INSTALL_FAILURE failure: $asset"
+        done
+        cmp "$XM_STATE" "$ROOT/asset-old-state" && cmp "$XM_BIN" "$ROOT/asset-old-core" || fail 'failed repeat install changed state/core'
+    }
+    for MOCK_INSTALL_FAILURE in copy service shortcut; do
+        if xm_install > "$ROOT/asset-install.out" 2> "$ROOT/asset-install.err"; then fail "repeat install $MOCK_INSTALL_FAILURE failure accepted"; fi
+        local_asset_check
+        xm_unlock
+    done
+) || fail 'new schedule asset rollback fixture'
+pass 'failed repeat install removes only newly introduced schedule assets and preserves preexisting assets/state/core'

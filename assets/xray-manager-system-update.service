@@ -1,0 +1,12 @@
+# xray-manager-owned:1
+[Unit]
+Description=Xray Manager scheduled system package update
+ConditionPathExists=/etc/xray-manager/system-update-schedule
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/xray-manager/xray-manager.sh scheduled-system-update
+UMask=0077
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal

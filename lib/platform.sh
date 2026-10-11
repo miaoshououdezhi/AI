@@ -94,31 +94,60 @@ platform_detect() {
     export XM_OS XM_OS_VERSION XM_INIT XM_ARCH XM_LIBC
 }
 
-platform_system_update() {
+_platform_system_update_lock_path() { printf '%s\n' /run/xray-manager-system-update.lock; }
+_platform_system_update_lock_mode() { stat -c %a -- "$1"; }
+_platform_system_update_lock_preflight() {
+    local lock=$1 parent=${1%/*} mode
+    _platform_no_symlink "$lock" || return 1
+    [[ -d $parent && -O $parent ]] || { _platform_error '系统更新锁目录不是 root 专有目录。'; return 1; }
+    mode=$(_platform_system_update_lock_mode "$parent") || return 1
+    [[ $mode =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 8#022) == 0 )) || { _platform_error '系统更新锁目录可被其他用户修改。'; return 1; }
+    if [[ -e $lock ]]; then
+        [[ -f $lock && -O $lock ]] || { _platform_error '系统更新锁文件不是 root 拥有的普通文件。'; return 1; }
+        mode=$(_platform_system_update_lock_mode "$lock") || return 1
+        [[ $mode =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 8#022) == 0 )) || { _platform_error '系统更新锁文件可被其他用户修改。'; return 1; }
+    fi
+}
+_platform_system_update_command() (
+    # 198 is reserved only in this subshell; the parent keeps it locked.
+    exec 198>&-
+    if [[ ${XM_LOCK_FD:-} =~ ^[0-9]+$ ]]; then exec {XM_LOCK_FD}>&-; fi
+    "$@"
+)
+platform_system_update() (
     [[ $# -eq 0 ]] || { _platform_error '系统更新不接受参数。'; return 1; }
     _platform_real || return 1
     platform_detect || return 1
-    local status
+    local status lock
+    case $XM_OS in debian|alpine) ;; *) _platform_error "不支持的系统：${XM_OS}。"; return 1 ;; esac
+    lock=$(_platform_system_update_lock_path) || return 1
+    _platform_system_update_lock_preflight "$lock" || return 1
+    command -v flock >/dev/null 2>&1 || { _platform_error '系统更新需要 flock 锁命令。'; return 1; }
+    (umask 077; : >> "$lock") || { _platform_error '无法创建系统更新锁文件。'; return 1; }
+    _platform_system_update_lock_preflight "$lock" || return 1
+    [[ ! -e /proc/self/fd/198 && ! -e /dev/fd/198 ]] || { _platform_error '系统更新专用锁描述符已被占用。'; return 1; }
+    exec 198>>"$lock" || return 1
+    if ! flock -n 198; then _platform_error '已有系统软件包更新正在执行。'; return 1; fi
     case $XM_OS in
         debian)
-            if apt-get --error-on=any update; then :; else
+            if _platform_system_update_command apt-get --error-on=any update; then :; else
                 status=$?
                 _platform_error "APT 软件包索引更新失败（退出码 ${status}）。" || :
                 return "$status"
             fi
-            if DEBIAN_FRONTEND=noninteractive apt-get upgrade --with-new-pkgs -y; then :; else
+            if DEBIAN_FRONTEND=noninteractive _platform_system_update_command apt-get upgrade --with-new-pkgs -y; then :; else
                 status=$?
                 _platform_error "APT 软件包升级失败（退出码 ${status}）。" || :
                 return "$status"
             fi
             ;;
         alpine)
-            if apk update; then :; else
+            if _platform_system_update_command apk update; then :; else
                 status=$?
                 _platform_error "APK 软件包索引更新失败（退出码 ${status}）。" || :
                 return "$status"
             fi
-            if apk upgrade; then :; else
+            if _platform_system_update_command apk upgrade; then :; else
                 status=$?
                 _platform_error "APK 软件包升级失败（退出码 ${status}）。" || :
                 return "$status"
@@ -126,7 +155,7 @@ platform_system_update() {
             ;;
         *) _platform_error "不支持的系统：${XM_OS}。"; return 1 ;;
     esac
-}
+)
 
 platform_dependencies() {
     _platform_real || return 1
@@ -316,7 +345,8 @@ platform_install_service() {
 platform_remove_service() {
     _platform_init_available || return 1
     local service
-    platform_restart_schedule_preflight || return 1
+    platform_restart_schedule_preflight && platform_system_update_schedule_preflight || return 1
+    platform_system_update_schedule disable || return 1
     platform_restart_schedule disable || return 1
     if [[ $XM_INIT == systemd ]]; then service=/etc/systemd/system/xray-manager.service; else service=/etc/init.d/xray-manager; fi
     _platform_check_service_file "$service" && _platform_check_service_file /etc/logrotate.d/xray-manager || return 1
@@ -668,7 +698,7 @@ _platform_schedule_read_time() {
     local extra
     [[ -f $file && ! -L $file ]] || return 1
     # shellcheck disable=SC2034
-    { IFS= read -r marker && IFS= read -r time && ! IFS= read -r extra; } < "$file" || return 1
+    { IFS= read -r marker && IFS= read -r time && ! IFS= read -r extra && [[ -z $extra ]]; } < "$file" || return 1
     [[ $marker == '# xray-manager-owned:1' ]] && _platform_schedule_time "$time" || return 1
     printf '%s\n' "$time"
 }
@@ -698,6 +728,9 @@ platform_restart_schedule() (
         set) (($# == 2)) && _platform_schedule_time "$time" || { _platform_error '时间必须为 00:00..23:59，例如 04:00（每天，本机时区）。'; return 2; } ;;
         *) _platform_error '定时重启操作为 status、set HH:MM 或 disable。'; return 2 ;;
     esac
+    if [[ $action != status && -n ${XM_ROOT:-} ]]; then
+        _platform_error 'XM_ROOT 沙箱模式禁止修改宿主定时服务。'; return 1
+    fi
     platform_restart_schedule_preflight || return 1
     if [[ $action == status ]]; then
         if [[ ! -e $XM_ETC/restart-schedule ]]; then
@@ -780,6 +813,275 @@ platform_restart_schedule() (
     if ! _platform_schedule_apply; then
         result=1
         if _platform_schedule_restore; then _platform_error '定时重启修改失败，已恢复原配置和启停状态。'; else _platform_error '定时重启修改及恢复失败，请检查专属调度服务。'; fi
+    fi
+    return "$result"
+)
+
+# Private system package update schedule. The manager owns every resource;
+# no cron entry or distro repository configuration is changed.
+_platform_update_schedule_period() { [[ ${1:-} == daily || ${1:-} == weekly || ${1:-} == monthly ]]; }
+# A calendar timer may fire after resume; accept only its scheduled local minute.
+# Return a distinct result on stdout so a skipped slot is not confused with an error.
+platform_system_update_schedule_due() (
+    [[ $# -eq 2 ]] && _platform_update_schedule_period "$1" && _platform_schedule_time "$2" || {
+        _platform_error '系统更新到点检查须为 daily|weekly|monthly HH:MM。'
+        return 2
+    }
+    local period=$1 target=$2 now clock weekday day
+    now=$(unset TZ; date '+%H:%M %u %d') || { _platform_error '无法读取本机时间。'; return 1; }
+    [[ $now =~ ^([01][0-9]|2[0-3]):[0-5][0-9]\ [1-7]\ (0[1-9]|[12][0-9]|3[01])$ ]] || {
+        _platform_error '本机时间格式无效。'
+        return 1
+    }
+    read -r clock weekday day <<< "$now"
+    if [[ $clock == "$target" ]] && {
+        [[ $period == daily ]] ||
+        [[ $period == weekly && $weekday == 1 ]] ||
+        [[ $period == monthly && $day == 01 ]]
+    }; then printf 'due\n'; else printf 'not-due\n'; fi
+)
+_platform_update_schedule_files() {
+    printf '%s\n' "$XM_ETC/system-update-schedule"
+    if [[ $XM_INIT == systemd ]]; then
+        printf '%s\n' /etc/systemd/system/xray-manager-system-update.service /etc/systemd/system/xray-manager-system-update.timer
+    else
+        printf '%s\n' /etc/init.d/xray-manager-system-update
+    fi
+}
+_platform_update_schedule_link() {
+    local link target
+    if [[ $XM_INIT == systemd ]]; then
+        link=/etc/systemd/system/timers.target.wants/xray-manager-system-update.timer
+        target=/etc/systemd/system/xray-manager-system-update.timer
+    else
+        link=/etc/runlevels/default/xray-manager-system-update
+        target=/etc/init.d/xray-manager-system-update
+    fi
+    _platform_no_symlink "${link%/*}" || return 1
+    if [[ -e $link || -L $link ]]; then
+        [[ -L $link && $(readlink "$link") == "$target" ]] || { _platform_error "系统更新开机链接不属于本项目：$link"; return 1; }
+        _platform_owned_file "$target" || { _platform_error '系统更新开机链接缺少受管服务。'; return 1; }
+    fi
+}
+# Optional root is used only by isolated fixture tests.
+# shellcheck disable=SC2120
+_platform_update_schedule_openrc_overrides() {
+    local root=${1:-} dir file
+    for dir in /etc /usr/local/etc /usr/lib/rc /lib/rc; do
+        for file in "$root$dir/conf.d/xray-manager-system-update" "$root$dir/conf.d/xray-manager-system-update."*; do
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "系统更新存在外部 OpenRC 覆盖配置：$file"; return 1; }
+        done
+        if [[ $dir != /etc ]]; then
+            file=$root$dir/init.d/xray-manager-system-update
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "其他 OpenRC 路径存在同名系统更新服务：$file"; return 1; }
+        fi
+    done
+    for file in "$root/etc/runlevels/"*/xray-manager-system-update; do
+        [[ -e $file || -L $file ]] || continue
+        [[ $file == "$root/etc/runlevels/default/xray-manager-system-update" ]] || { _platform_error "系统更新存在外部运行级别链接：$file"; return 1; }
+    done
+}
+# shellcheck disable=SC2120
+_platform_update_schedule_pid_preflight() {
+    local root=${1:-} pid
+    pid=$root/run/xray-manager-system-update.pid
+    _platform_no_symlink "$pid" || return 1
+    if [[ -e $pid ]]; then
+        [[ -f $pid ]] || { _platform_error "系统更新 PID 路径不是普通文件：$pid"; return 1; }
+        _platform_owned_file "$root/etc/init.d/xray-manager-system-update" || { _platform_error "系统更新 PID 文件没有对应受管服务：$pid"; return 1; }
+    fi
+}
+platform_system_update_schedule_preflight() {
+    _platform_paths && _platform_init_available || return 1
+    local file dir
+    if [[ -e $XM_ETC || -L $XM_ETC ]]; then
+        _platform_owned_dir "$XM_ETC" || { _platform_error '配置目录缺少所有权标记。'; return 1; }
+    fi
+    while IFS= read -r file; do _platform_check_service_file "$file" || return 1; done < <(_platform_update_schedule_files)
+    _platform_update_schedule_link || return 1
+    if [[ $XM_INIT == systemd ]]; then
+        for dir in /usr/lib/systemd/system /lib/systemd/system /run/systemd/system; do
+            for file in xray-manager-system-update.service xray-manager-system-update.timer xray-manager-system-update.service.d xray-manager-system-update.timer.d; do
+                [[ ! -e $dir/$file && ! -L $dir/$file ]] || { _platform_error "发现其他位置的同名系统更新资源：$dir/$file"; return 1; }
+            done
+        done
+        for file in /etc/systemd/system/xray-manager-system-update.service.d /etc/systemd/system/xray-manager-system-update.timer.d; do
+            [[ ! -e $file && ! -L $file ]] || { _platform_error "拒绝接管带外部覆盖配置的系统更新资源：$file"; return 1; }
+        done
+    else
+        _platform_update_schedule_openrc_overrides || return 1
+        _platform_update_schedule_pid_preflight || return 1
+        _platform_no_symlink "$XM_LOG/system-update-schedule.log" || return 1
+        [[ ! -e $XM_LOG/system-update-schedule.log || -f $XM_LOG/system-update-schedule.log ]] || { _platform_error '系统更新日志不是普通文件。'; return 1; }
+        _platform_no_symlink "$XM_HOME/assets/xray-manager-system-update.py" || return 1
+        if [[ -e $XM_HOME/assets/xray-manager-system-update.py ]]; then
+            _platform_owned_file "$XM_HOME/assets/xray-manager-system-update.py" || { _platform_error '系统更新调度程序不属于本项目。'; return 1; }
+        fi
+    fi
+}
+_platform_update_schedule_enabled() {
+    if [[ $XM_INIT == systemd ]]; then systemctl is-enabled --quiet xray-manager-system-update.timer
+    else [[ -L /etc/runlevels/default/xray-manager-system-update ]]; fi
+}
+_platform_update_schedule_running() {
+    if [[ $XM_INIT == systemd ]]; then systemctl is-active --quiet xray-manager-system-update.timer
+    else rc-service xray-manager-system-update status >/dev/null 2>&1; fi
+}
+_platform_update_schedule_control() {
+    local action=$1
+    if [[ $XM_INIT == systemd ]]; then
+        _platform_schedule_command systemctl "$action" xray-manager-system-update.timer
+    else
+        case $action in
+            enable) _platform_schedule_command rc-update add xray-manager-system-update default ;;
+            disable) if _platform_update_schedule_enabled; then _platform_schedule_command rc-update del xray-manager-system-update default; fi ;;
+            *) _platform_schedule_command rc-service xray-manager-system-update "$action" ;;
+        esac
+    fi
+}
+_platform_update_schedule_read() {
+    local file=$XM_ETC/system-update-schedule marker period time extra
+    [[ -f $file && ! -L $file ]] || return 1
+    { IFS= read -r marker && IFS= read -r period && IFS= read -r time && ! IFS= read -r extra && [[ -z $extra ]]; } < "$file" || return 1
+    [[ $marker == '# xray-manager-owned:1' ]] && _platform_update_schedule_period "$period" && _platform_schedule_time "$time" || return 1
+    printf '%s\t%s\n' "$period" "$time"
+}
+_platform_update_schedule_calendar() {
+    local period=$1 time=$2
+    case $period in
+        daily) printf '*-*-* %s:00\n' "$time" ;;
+        weekly) printf 'Mon *-*-* %s:00\n' "$time" ;;
+        monthly) printf '*-*-01 %s:00\n' "$time" ;;
+        *) return 1 ;;
+    esac
+}
+_platform_update_schedule_local_next() {
+    if [[ ${1:--} == - ]]; then
+        local zone
+        zone=$(unset TZ; date '+%Z %z') || zone='未知'
+        zone=${zone//$'\n'/}
+        printf '%s\t-\n' "${zone:-未知}"
+        return 0
+    fi
+    _platform_python - "${1:--}" "${2:--}" <<'PYNEXTUPDATE'
+import datetime, os, sys, time
+os.environ.pop('TZ', None); time.tzset()
+now=datetime.datetime.now().astimezone();zone=now.strftime('%Z %z')
+period,target=sys.argv[1:]
+if period=='-':print(zone+'\t-');sys.exit(0)
+hour,minute=map(int,target.split(':'))
+for offset in range(370):
+ day=(now+datetime.timedelta(days=offset)).date()
+ if period=='weekly' and day.weekday()!=0:continue
+ if period=='monthly' and day.day!=1:continue
+ stamp=time.mktime((day.year,day.month,day.day,hour,minute,0,0,0,-1))
+ candidate=datetime.datetime.fromtimestamp(stamp).astimezone()
+ if (candidate.date(),candidate.hour,candidate.minute)!=(day,hour,minute) or candidate<=now:continue
+ print(zone+'\t'+candidate.strftime('%Y-%m-%d %H:%M:%S %Z'));sys.exit(0)
+print(zone+'\t-')
+PYNEXTUPDATE
+}
+
+platform_system_update_schedule() (
+    local action=${1:-} period=${2:-} time=${3:-} file tmp calendar row
+    local old_enabled=0 old_running=0 index=0 result=0
+    case $action in
+        status|disable) (($# == 1)) || { _platform_error 'status/disable 不接受额外参数。'; return 2; } ;;
+        set) (($# == 3)) && _platform_update_schedule_period "$period" && _platform_schedule_time "$time" || { _platform_error '系统更新计划须为 daily|weekly|monthly HH:MM。'; return 2; } ;;
+        *) _platform_error '系统更新计划操作为 status、set PERIOD HH:MM 或 disable。'; return 2 ;;
+    esac
+    if [[ $action != status && -n ${XM_ROOT:-} ]]; then
+        _platform_error 'XM_ROOT 沙箱模式禁止修改宿主定时服务。'; return 1
+    fi
+    platform_system_update_schedule_preflight || return 1
+    if [[ $action == status ]]; then
+        if [[ ! -e $XM_ETC/system-update-schedule ]]; then
+            printf 'disabled\tmanual\t-\t'; _platform_update_schedule_local_next - -; return $?
+        fi
+        row=$(_platform_update_schedule_read) || { _platform_error '系统更新计划配置格式无效。'; return 1; }
+        IFS=$'\t' read -r period time <<< "$row"
+        if _platform_update_schedule_enabled && _platform_update_schedule_running; then
+            printf 'enabled\t%s\t%s\t' "$period" "$time"
+            if [[ $XM_INIT == systemd ]]; then
+                local zone next
+                zone=$(_platform_update_schedule_local_next - -) || return 1
+                zone=${zone%%$'\t'*}
+                next=$(systemctl show --property=NextElapseUSecRealtime --value xray-manager-system-update.timer) || return 1
+                [[ -n $next && $next != n/a ]] || next=-
+                printf '%s\t%s\n' "$zone" "$next"
+            else _platform_update_schedule_local_next "$period" "$time"; fi
+        else
+            printf 'disabled\t%s\t%s\t' "$period" "$time"
+            _platform_update_schedule_local_next - -
+        fi
+        return $?
+    fi
+    _platform_owned_dir "$XM_ETC" || { _platform_error '请先安装管理程序。'; return 1; }
+    [[ -x $XM_HOME/xray-manager.sh && ! -L $XM_HOME/xray-manager.sh ]] || { _platform_error '管理程序尚未安装。'; return 1; }
+    if [[ $action == disable && ! -e $XM_ETC/system-update-schedule ]]; then
+        local resources=0
+        while IFS= read -r file; do [[ ! -e $file ]] || resources=1; done < <(_platform_update_schedule_files)
+        if ((resources == 0)); then return 0; fi
+    fi
+    if [[ $XM_INIT == openrc && $action == set ]]; then
+        [[ -f $XM_HOME/assets/xray-manager-system-update.py ]] && _platform_owned_file "$XM_HOME/assets/xray-manager-system-update.py" || { _platform_error '缺少本项目系统更新 Python 调度程序，请更新管理脚本。'; return 1; }
+        command -v python3 >/dev/null 2>&1 || { _platform_error '缺少 Python3 调度依赖。'; return 1; }
+    fi
+    tmp=$(umask 077; mktemp -d "$XM_ETC/.system-update-schedule.XXXXXXXX") || return 1
+    trap 'rm -rf -- "$tmp"' EXIT
+    local -a files=()
+    while IFS= read -r file; do
+        files+=("$file")
+        if [[ -e $file ]]; then cp -p -- "$file" "$tmp/old-$index" || return 1; fi
+        index=$((index+1))
+    done < <(_platform_update_schedule_files)
+    _platform_update_schedule_enabled && old_enabled=1
+    _platform_update_schedule_running && old_running=1
+    _platform_update_schedule_restore() {
+        local i mode
+        _platform_update_schedule_running && _platform_update_schedule_control stop >/dev/null 2>&1 || true
+        _platform_update_schedule_enabled && _platform_update_schedule_control disable >/dev/null 2>&1 || true
+        for ((i=0; i<${#files[@]}; i++)); do
+            _platform_no_symlink "${files[i]}" || return 1
+            if [[ -e $tmp/old-$i ]]; then
+                mode=$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$tmp/old-$i") || return 1
+                _platform_install_owned "$tmp/old-$i" "${files[i]}" "$mode" || return 1
+            else rm -f -- "${files[i]}" || return 1; fi
+        done
+        [[ $XM_INIT != systemd ]] || _platform_schedule_command systemctl daemon-reload || return 1
+        ((old_enabled == 0)) || _platform_update_schedule_control enable || return 1
+        ((old_running == 0)) || _platform_update_schedule_control start || return 1
+    }
+    _platform_update_schedule_apply() {
+        ((old_running == 0)) || _platform_update_schedule_control stop || return 1
+        if [[ $action == disable ]]; then
+            ((old_enabled == 0)) || _platform_update_schedule_control disable || return 1
+            platform_system_update_schedule_preflight || return 1
+            for file in "${files[@]}"; do rm -f -- "$file" || return 1; done
+        else
+            printf '# xray-manager-owned:1\n%s\n%s\n' "$period" "$time" > "$tmp/state" || return 1
+            _platform_install_owned "$tmp/state" "$XM_ETC/system-update-schedule" 0600 || return 1
+            if [[ $XM_INIT == systemd ]]; then
+                calendar=$(_platform_update_schedule_calendar "$period" "$time") || return 1
+                sed "s/@CALENDAR@/$calendar/" "$_XM_PLATFORM_ASSETS/xray-manager-system-update.timer" > "$tmp/timer" || return 1
+                _platform_install_owned "$_XM_PLATFORM_ASSETS/xray-manager-system-update.service" /etc/systemd/system/xray-manager-system-update.service 0644 &&
+                    _platform_install_owned "$tmp/timer" /etc/systemd/system/xray-manager-system-update.timer 0644 || return 1
+            else
+                _platform_install_owned "$_XM_PLATFORM_ASSETS/xray-manager-system-update.openrc" /etc/init.d/xray-manager-system-update 0755 || return 1
+            fi
+        fi
+        [[ $XM_INIT != systemd ]] || _platform_schedule_command systemctl daemon-reload || return 1
+        if [[ $action == set ]]; then
+            _platform_update_schedule_control enable && _platform_update_schedule_control start && _platform_update_schedule_running || return 1
+        fi
+    }
+    if ! _platform_update_schedule_apply; then
+        result=1
+        if _platform_update_schedule_restore; then
+            _platform_error '系统更新计划修改失败，已恢复原配置和启停状态。' || :
+        else
+            _platform_error '系统更新计划修改及恢复失败，请检查专属调度服务。' || :
+        fi
     fi
     return "$result"
 )
@@ -1159,14 +1461,14 @@ _platform_clean_files_preflight() {
     _platform_python - "$XM_HOME" "$XM_ETC" "$XM_DATA" "$XM_LOG" <<'PY'
 import pathlib,re,sys
 home,etc,data,logs=map(pathlib.Path,sys.argv[1:])
-allowed={home:{'.xray-manager-owned','xray-manager.sh','install.sh','bin','lib','assets'},home/'bin':{'xray','xray.previous','sing-box'},home/'lib':{'common.sh','state.sh','platform.sh','protocol.sh'},home/'assets':{'xray-outbound.py','xy','xray-manager.service','xray-manager.openrc','xray-manager.logrotate','xray-manager-restart.service','xray-manager-restart.timer','xray-manager-restart.openrc','xray-manager-restart.py','xray-manager-extra.service','xray-manager-extra.openrc'},etc:{'.xray-manager-owned','.manager.lock','state.json','config.json','extra.json','extra-core.sha256','core.previous-version','restart-schedule','dependency-ledger.json'},data:{'.xray-manager-owned','.xray-manager-account'},logs:{'.xray-manager-owned','console.log','extra-console.log','restart-schedule.log','last-error.log','last-extra-error.log'}}
+allowed={home:{'.xray-manager-owned','xray-manager.sh','install.sh','bin','lib','assets'},home/'bin':{'xray','xray.previous','sing-box'},home/'lib':{'common.sh','state.sh','platform.sh','protocol.sh'},home/'assets':{'xray-outbound.py','xy','xray-manager.service','xray-manager.openrc','xray-manager.logrotate','xray-manager-restart.service','xray-manager-restart.timer','xray-manager-restart.openrc','xray-manager-restart.py','xray-manager-system-update.service','xray-manager-system-update.timer','xray-manager-system-update.openrc','xray-manager-system-update.py','xray-manager-extra.service','xray-manager-extra.openrc'},etc:{'.xray-manager-owned','.manager.lock','state.json','config.json','extra.json','extra-core.sha256','core.previous-version','restart-schedule','system-update-schedule','dependency-ledger.json'},data:{'.xray-manager-owned','.xray-manager-account'},logs:{'.xray-manager-owned','console.log','extra-console.log','restart-schedule.log','system-update-schedule.log','last-error.log','last-extra-error.log'}}
 try:
  for base in (home,etc,data,logs):
   for p in base.rglob('*'):
    if p.is_symlink():raise ValueError('symlink '+str(p))
    names=allowed.get(p.parent,set())
    extra=p.parent==etc and re.fullmatch(r'trojan-retired-backup\.[A-Za-z0-9]{8}',p.name)
-   rotated=p.parent==logs and re.fullmatch(r'(console|extra-console|restart-schedule)\.log\.[1-4](?:\.gz)?',p.name)
+   rotated=p.parent==logs and re.fullmatch(r'(console|extra-console|restart-schedule|system-update-schedule)\.log\.[1-4](?:\.gz)?',p.name)
    if p.name not in names and not extra and not rotated:raise ValueError('unknown file retained: '+str(p))
    if p.is_dir() and p not in allowed:raise ValueError('unexpected directory '+str(p))
    if not(p.is_dir() or p.is_file()):raise ValueError('non-regular file '+str(p))
@@ -1198,7 +1500,7 @@ PY
 platform_clean_uninstall_preflight() {
     _platform_clean_files_preflight && _platform_clean_account_preflight && platform_shortcut_preflight || return 1
     if [[ -z ${XM_ROOT:-} ]]; then
-        platform_restart_schedule_preflight && platform_extra_preflight && _platform_main_resource_preflight || return 1
+        platform_restart_schedule_preflight && platform_system_update_schedule_preflight && platform_extra_preflight && _platform_main_resource_preflight || return 1
         local service
         [[ $XM_INIT != systemd ]] && service=/etc/init.d/xray-manager || service=/etc/systemd/system/xray-manager.service
         _platform_check_service_file "$service" && _platform_check_service_file /etc/logrotate.d/xray-manager || return 1
@@ -1221,7 +1523,7 @@ platform_clean_uninstall() (
         _platform_clean_account_preflight || return 1
         if [[ $XM_INIT == openrc ]]; then
             local pidfile
-            for pidfile in /run/xray-manager.pid /run/xray-manager-extra.pid /run/xray-manager-restart.pid; do
+            for pidfile in /run/xray-manager.pid /run/xray-manager-extra.pid /run/xray-manager-restart.pid /run/xray-manager-system-update.pid; do
                 _platform_no_symlink "$pidfile" || return 1
                 [[ ! -e $pidfile || -f $pidfile ]] || return 1
                 rm -f -- "$pidfile" || return 1

@@ -279,6 +279,7 @@ source <(sed -n '/^xm_dispatch() {/,/^}/p' "$TEST_REPO/xray-manager.sh")
     if xm_main --yes update-system >/dev/null 2>&1; then fail 'XM_ROOT system update permitted'; fi
     [[ ! -e $TEST_UPDATE_CALL ]] || fail 'sandbox reached system updater'
     XM_ROOT=
+    XM_ETC="$TEST_ROOT/no-install-etc"
     TEST_ALLOW_ROOT=0
     if xm_main --yes update-system >/dev/null 2>&1; then fail 'non-root system update permitted'; fi
     [[ ! -e $TEST_UPDATE_CALL ]] || fail 'root check reached system updater'
@@ -303,8 +304,84 @@ source <(sed -n '/^xm_dispatch() {/,/^}/p' "$TEST_REPO/xray-manager.sh")
     grep -Fq 'apk update && apk upgrade' "$TEST_ROOT/system-alpine.log" || fail 'Alpine command not shown'
     TEST_PLATFORM_STATUS=23
     if xm_main --yes update-system >/dev/null 2>&1; then fail 'platform failure hidden'; else [[ $? == 23 ]] || fail 'platform failure code lost'; fi
+    TEST_PLATFORM_STATUS=0
+    XM_ETC="$TEST_ROOT/root/etc/xray-manager"
+    printf 'xray-manager:1\n' > "$XM_ETC/.xray-manager-owned"
+    TEST_BEFORE=$(wc -l < "$TEST_UPDATE_CALL")
+    exec {TEST_HELD_FD}>"$XM_ETC/.manager.lock"
+    flock -n "$TEST_HELD_FD" || fail 'lock contention fixture'
+    if xm_main --yes update-system >/dev/null 2>&1; then fail 'busy manager lock allowed manual package update'; fi
+    [[ $(wc -l < "$TEST_UPDATE_CALL") == "$TEST_BEFORE" ]] || fail 'busy lock reached package updater'
+    exec {TEST_HELD_FD}>&-
+    xm_main --yes update-system >/dev/null 2>&1 || fail 'installed manual update after lock acquisition'
+    [[ -z $XM_LOCK_FD && $(wc -l < "$TEST_UPDATE_CALL") -eq $((TEST_BEFORE+1)) ]] || fail 'installed update skipped lock or platform'
 ) || fail 'system update CLI safety fixture'
-pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation, shows commands and propagates failure'
+pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation and the manager lock, and propagates failure'
+(
+    TEST_SCHEDULE_CALL="$TEST_ROOT/system-schedule-call"
+    TEST_SCHEDULE_ENABLED=0 TEST_SCHEDULE_FAIL=0 TEST_SYSTEM_CALL="$TEST_ROOT/scheduled-system-call"
+    TEST_DUE_RESULT=due TEST_DUE_FAILURE=0 TEST_DUE_CALL="$TEST_ROOT/system-schedule-due-call"
+    xm_require_root() { return 0; }
+    platform_detect() { return 0; }
+    xm_ready() { return 0; }
+    platform_system_update_schedule() {
+        if [[ $1 == status ]]; then
+            if [[ $TEST_SCHEDULE_ENABLED == 1 ]]; then printf 'enabled\tweekly\t04:00\tUTC\t2026-10-12 04:00\n'; else printf 'disabled\tmanual\t-\tUTC\t-\n'; fi
+            return 0
+        fi
+        printf '%s\n' "$*" >> "$TEST_SCHEDULE_CALL"
+        [[ $TEST_SCHEDULE_FAIL == 0 ]]
+    }
+    platform_system_update_schedule_due() {
+        printf '%s\n' "$*" >> "$TEST_DUE_CALL"
+        [[ $TEST_DUE_FAILURE == 0 ]] || return 1
+        printf '%s\n' "$TEST_DUE_RESULT"
+    }
+    platform_system_update() { printf 'update\n' >> "$TEST_SYSTEM_CALL"; return 0; }
+    xm_confirm() { local answer; [[ $XM_YES == 1 ]] && return 0; IFS= read -r answer || return 2; xm_yes "$answer" || return 2; }
+    if xm_dispatch system-update-schedule set yearly 04:00 >/dev/null 2>&1; then fail 'invalid system update period accepted'; else [[ $? == 2 ]] || fail 'invalid system update period status'; fi
+    if xm_dispatch system-update-schedule set daily 4:00 >/dev/null 2>&1; then fail 'invalid system update time accepted'; else [[ $? == 2 ]] || fail 'invalid system update time status'; fi
+    [[ ! -e $TEST_SCHEDULE_CALL ]] || fail 'invalid system schedule reached platform'
+    if xm_main --yes system-update-schedule set daily 04:00 >/dev/null 2>&1; then fail 'sandbox system schedule permitted'; fi
+    [[ ! -e $TEST_SCHEDULE_CALL ]] || fail 'sandbox schedule reached platform'
+    XM_ROOT='' XM_YES=0
+    [[ $(xm_dispatch system-update-schedule status) == $'disabled\tmanual\t-\tUTC\t-' ]] || fail 'disabled system schedule status'
+    if xm_dispatch scheduled-system-update >/dev/null 2>&1; then fail 'disabled scheduled worker ran'; fi
+    [[ ! -e $TEST_DUE_CALL ]] || fail 'disabled worker reached due check'
+    [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'disabled worker reached package updater'
+    printf 'n\n' > "$TEST_ROOT/input"
+    if xm_dispatch system-update-schedule set daily 04:00 < "$TEST_ROOT/input" >/dev/null 2>&1; then fail 'declined system schedule enabled'; else [[ $? == 2 ]] || fail 'declined system schedule status'; fi
+    [[ ! -e $TEST_SCHEDULE_CALL ]] || fail 'declined schedule reached platform'
+    TEST_SCHEDULE_FAIL=1
+    if xm_main --yes system-update-schedule set daily 04:00 >/dev/null 2>&1; then fail 'platform schedule failure hidden'; fi
+    TEST_SCHEDULE_FAIL=0
+    XM_YES=0
+    : > "$TEST_SCHEDULE_CALL"
+    printf 'YeS\n' > "$TEST_ROOT/input"
+    xm_dispatch system-update-schedule set weekly 04:00 < "$TEST_ROOT/input" >/dev/null 2>&1 || fail 'confirmed weekly system schedule'
+    [[ $(cat "$TEST_SCHEDULE_CALL") == 'set weekly 04:00' ]] || fail 'weekly schedule arguments'
+    TEST_SCHEDULE_ENABLED=1
+    TEST_DUE_RESULT=not-due
+    xm_dispatch scheduled-system-update >/dev/null 2>&1 || fail 'late scheduled worker did not skip cleanly'
+    [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'late scheduled worker reached package updater'
+    TEST_DUE_RESULT=invalid
+    if xm_dispatch scheduled-system-update >/dev/null 2>&1; then fail 'invalid due response accepted'; fi
+    [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'invalid due response reached package updater'
+    TEST_DUE_RESULT=due TEST_DUE_FAILURE=1
+    if xm_dispatch scheduled-system-update >/dev/null 2>&1; then fail 'due calculation failure accepted'; fi
+    [[ ! -e $TEST_SYSTEM_CALL ]] || fail 'due calculation failure reached package updater'
+    TEST_DUE_FAILURE=0
+    xm_dispatch scheduled-system-update >/dev/null 2>&1 || fail 'enabled scheduled worker'
+    [[ $(cat "$TEST_DUE_CALL") == $'weekly 04:00\nweekly 04:00\nweekly 04:00\nweekly 04:00' ]] || fail 'scheduled worker due arguments'
+    [[ $(cat "$TEST_SYSTEM_CALL") == update ]] || fail 'scheduled worker package dispatch'
+    TEST_SCHEDULE_ENABLED=0
+    printf 'n\n' > "$TEST_ROOT/input"
+    if xm_dispatch system-update-schedule disable < "$TEST_ROOT/input" >/dev/null 2>&1; then fail 'declined schedule disable accepted'; fi
+    [[ $(cat "$TEST_SCHEDULE_CALL") == 'set weekly 04:00' ]] || fail 'declined disable reached platform'
+    xm_main --yes system-update-schedule disable >/dev/null 2>&1 || fail 'explicit disable with --yes'
+    [[ $(tail -n 1 "$TEST_SCHEDULE_CALL") == disable ]] || fail 'disable schedule arguments'
+) || fail 'system update schedule CLI fixture'
+pass 'system update schedule validates period/time, confirms changes and gates the internal worker'
 TEST_CHECK_LOCK=0
 platform_restart_schedule() {
     if [[ $TEST_CHECK_LOCK == 1 && -e /proc/self/fd/$XM_LOCK_FD ]]; then fail 'scheduler platform inherited manager lock'; fi
@@ -355,12 +432,42 @@ pass 'schedule strict time, y confirmation, decline, and stopped-core skip'
     xm_menu_node() { printf 'node-%s\n' "$1" >> "$TEST_ROOT/routes"; }
     xm_menu_add() { printf 'add\n' >> "$TEST_ROOT/routes"; }
     xm_menu_service() { printf 'service\n' >> "$TEST_ROOT/routes"; }
+    xm_menu_system_update() { printf 'system-update-menu\n' >> "$TEST_ROOT/routes"; }
     printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n/tmp/export.json\n14\n/tmp/import.json\n15\n0\n' > "$TEST_ROOT/route-input"
     xm_menu < "$TEST_ROOT/route-input" >/dev/null 2> "$TEST_ROOT/route-log" || fail 'main menu route loop'
-    printf 'install\nupgrade\nrollback\nupdate-manager\nupdate-system\nnode-view\nadd\nnode-delete\nnode-share\nservice\nlogs\ndiagnose\nexport\nimport\nuninstall\n' > "$TEST_ROOT/expected-routes"
+    printf 'install\nupgrade\nrollback\nupdate-manager\nsystem-update-menu\nnode-view\nadd\nnode-delete\nnode-share\nservice\nlogs\ndiagnose\nexport\nimport\nuninstall\n' > "$TEST_ROOT/expected-routes"
     cmp "$TEST_ROOT/routes" "$TEST_ROOT/expected-routes" || fail 'main menu numbering mismatches handlers'
 ) || fail 'main menu dispatch fixture'
 pass 'main menu numbers 1..15 route to every intended handler'
+(
+    TEST_MENU_STATUS=enabled
+    xm_dispatch() {
+        if [[ $1 == system-update-schedule && $2 == status ]]; then printf '%s\tweekly\t04:00\tUTC\t2026-10-12 04:00\n' "$TEST_MENU_STATUS"
+        else printf '%s\n' "$*" >> "$TEST_ROOT/system-menu-routes"; fi
+    }
+    printf '1\n' > "$TEST_ROOT/input"
+    xm_menu_system_update < "$TEST_ROOT/input" >/dev/null 2> "$TEST_ROOT/system-menu.log" || fail 'immediate update submenu'
+    grep -Fq '每周一 04:00' "$TEST_ROOT/system-menu.log" || fail 'schedule status not displayed'
+    grep -Fq '下次执行' "$TEST_ROOT/system-menu.log" || fail 'next run not displayed'
+    TEST_MENU_STATUS=disabled
+    printf '0\n' > "$TEST_ROOT/input"
+    xm_menu_system_update < "$TEST_ROOT/input" >/dev/null 2> "$TEST_ROOT/system-stopped.log" || fail 'stopped system schedule display'
+    grep -Fq '已配置每周一 04:00，任务未运行' "$TEST_ROOT/system-stopped.log" || fail 'stopped schedule mislabelled as manual'
+    grep -Fq '专属调度日志' "$TEST_ROOT/system-stopped.log" || fail 'stopped schedule recovery hint missing'
+    if grep -Fq '下次执行' "$TEST_ROOT/system-stopped.log"; then fail 'stopped schedule claims next run'; fi
+    TEST_MENU_STATUS=enabled
+    printf '2\nbad\n05:10\n' > "$TEST_ROOT/input"
+    xm_menu_system_update < "$TEST_ROOT/input" >/dev/null 2>&1 || fail 'daily submenu time retry'
+    printf '3\n\n' > "$TEST_ROOT/input"
+    xm_menu_system_update < "$TEST_ROOT/input" >/dev/null 2>&1 || fail 'weekly submenu default'
+    printf '4\n\n' > "$TEST_ROOT/input"
+    xm_menu_system_update < "$TEST_ROOT/input" >/dev/null 2>&1 || fail 'monthly submenu default'
+    printf '5\n' > "$TEST_ROOT/input"
+    xm_menu_system_update < "$TEST_ROOT/input" >/dev/null 2>&1 || fail 'manual-only submenu'
+    printf 'update-system\nsystem-update-schedule set daily 05:10\nsystem-update-schedule set weekly 04:00\nsystem-update-schedule set monthly 04:00\nsystem-update-schedule disable\n' > "$TEST_ROOT/system-menu-expected"
+    cmp "$TEST_ROOT/system-menu-routes" "$TEST_ROOT/system-menu-expected" || fail 'system update submenu routes'
+) || fail 'system update submenu fixture'
+pass 'system update submenu shows status and routes immediate/daily/weekly/monthly/manual choices'
 # Selection keeps full data/identity while only the display copy is cropped.
 xm_dispatch() { printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$TEST_CALL"; }
 state_empty v26.3.27 > "$XM_STATE"
