@@ -266,7 +266,13 @@ source <(sed -n '/^xm_dispatch() {/,/^}/p' "$TEST_REPO/xray-manager.sh")
     TEST_UPDATE_CALL="$TEST_ROOT/system-update-call"
     TEST_ALLOW_ROOT=1 TEST_OS=debian TEST_PLATFORM_STATUS=0
     xm_require_root() { [[ $TEST_ALLOW_ROOT == 1 ]]; }
-    platform_detect() { [[ $TEST_OS != invalid ]] || return 1; XM_OS=$TEST_OS; XM_OS_VERSION=13; }
+    platform_detect() {
+        [[ $TEST_OS != invalid ]] || return 1
+        XM_OS=$TEST_OS
+        # Sourced xm_update_system reads this value; ShellCheck cannot follow the test fixture.
+        # shellcheck disable=SC2034
+        XM_OS_VERSION=13
+    }
     platform_system_update() { printf '%s\n' "$XM_OS" >> "$TEST_UPDATE_CALL"; return "$TEST_PLATFORM_STATUS"; }
     if xm_dispatch update-system extra >/dev/null 2>&1; then fail 'system update accepted argument'; else [[ $? == 2 ]] || fail 'system update argument status'; fi
     [[ ! -e $TEST_UPDATE_CALL ]] || fail 'invalid argument reached system updater'
