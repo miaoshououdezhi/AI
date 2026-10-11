@@ -35,6 +35,7 @@ xray-manager — Xray 中文交互管理
 
   install [v版本]                 安装，默认 v26.3.27；重复安装保留节点
   update-manager                 获取项目 main 的最新管理脚本（保留核心/节点）
+  update-system                  更新当前 Debian/Alpine 软件包，需要确认或 --yes
   upgrade v版本                  指定核心版本升级，保留上一版供回退
   rollback                       切换到上一版核心
   list                           列出节点（不显示秘密）
@@ -147,7 +148,7 @@ xm_install() {
         rm -f -- "$XM_STATE" "$XM_CONFIG" "$XM_EXTRA_CONFIG" "$XM_BIN"
         xm_error '首次启动失败，已撤销服务和初始状态；可检查日志后重新 install。'; return 1
     fi
-    xm_success "安装完成：核心 $version，无公网监听。入口：xy（或 bash $XM_HOME/xray-manager.sh）"
+    xm_success "安装完成：核心 ${version}，无公网监听。入口：xy（或 bash $XM_HOME/xray-manager.sh）"
 }
 xm_upgrade() {
     (($# == 1)) || { xm_usage_error 'upgrade 需要显式指定 v版本。'; return 2; }
@@ -157,7 +158,7 @@ xm_upgrade() {
     platform_fetch_core "$1" "$XM_WORK_DIR/xray" || return 1
     jq --arg version "$1" '.core_version=$version' "$XM_STATE" > "$XM_WORK_DIR/state.json" || return 1
     state_apply "$XM_WORK_DIR/state.json" "$XM_WORK_DIR/xray" || return 1
-    xm_success "核心已切换至 $1，原运行状态已保留。"
+    xm_success "核心已切换至 ${1}，原运行状态已保留。"
 }
 xm_rollback() {
     (($# == 0)) || { xm_usage_error 'rollback 不接受参数。'; return 2; }
@@ -169,7 +170,7 @@ xm_rollback() {
     cp -- "$XM_HOME/bin/xray.previous" "$XM_WORK_DIR/xray" && chmod 0755 "$XM_WORK_DIR/xray" || return 1
     jq --arg version "$version" '.core_version=$version' "$XM_STATE" > "$XM_WORK_DIR/state.json" || return 1
     state_apply "$XM_WORK_DIR/state.json" "$XM_WORK_DIR/xray" || return 1
-    xm_success "核心已回退至 $version。"
+    xm_success "核心已回退至 ${version}。"
 }
 xm_list() {
     (($# == 0)) || { xm_usage_error 'list 不接受参数。'; return 2; }
@@ -569,7 +570,7 @@ xm_backup() {
     [[ $1 == /* && $1 != */ ]] || { xm_usage_error '导出路径必须是绝对文件路径。'; return 2; }
     xm_ready && xm_path_no_links "$1" || return 1
     (umask 077; set -o noclobber; cat "$XM_STATE" > "$1") || { xm_error '导出写入失败：目录须存在，目标文件须不存在。'; return 1; }
-    xm_success "配置已导出：$1；节点 $(jq '.nodes|length' "$XM_STATE")；权限 0600。"
+    xm_success "配置已导出：${1}；节点 $(jq '.nodes|length' "$XM_STATE")；权限 0600。"
     xm_warning '文件包含密码、私钥和证书，迁移完成后请妥善保管。'
 }
 xm_restore() {
@@ -581,7 +582,7 @@ xm_restore() {
     xm_import_snapshot "$1" "$XM_WORK_DIR/import.json" || return 1
     state_validate "$XM_WORK_DIR/import.json" || return 1
     count=$(jq '.nodes|length' "$XM_WORK_DIR/import.json") || return 1
-    xm_info "导入文件：$1；节点数：$count；替换全部当前节点，核心版本保持。"
+    xm_info "导入文件：${1}；节点数：${count}；替换全部当前节点，核心版本保持。"
     xm_unlock
     xm_confirm '确认导入配置并替换当前节点？' || return 2
     xm_ready || return 1
@@ -593,7 +594,7 @@ xm_restore() {
     done < <(jq -c '.nodes[]' "$XM_WORK_DIR/import.json")
     jq --arg version "$(jq -r .core_version "$XM_STATE")" '.core_version=$version' "$XM_WORK_DIR/import.json" > "$XM_WORK_DIR/state.json" || return 1
     state_apply "$XM_WORK_DIR/state.json" || return 1
-    xm_success "已导入 $count 个节点：$1；各核心原运行状态已保留。"
+    xm_success "已导入 $count 个节点：${1}；各核心原运行状态已保留。"
 }
 xm_uninstall() {
     (($# == 0)) || { xm_usage_error 'uninstall 不接受参数。'; return 2; }
@@ -682,6 +683,22 @@ xm_update_manager() (
     xm_success '管理脚本更新完成。请重新运行 xy，加载新菜单和模块。'
 )
 
+xm_update_system() {
+    (($# == 0)) || { xm_usage_error 'update-system 不接受参数。'; return 2; }
+    xm_require_root || return 1
+    [[ -z $XM_ROOT ]] || { xm_error 'XM_ROOT 隔离模式禁止更新宿主系统软件包。'; return 1; }
+    platform_detect || return 1
+    case $XM_OS in
+        debian) xm_info "检测到 Debian ${XM_OS_VERSION}；将执行 apt-get --error-on=any update && DEBIAN_FRONTEND=noninteractive apt-get upgrade --with-new-pkgs -y。" ;;
+        alpine) xm_info "检测到 Alpine ${XM_OS_VERSION}；将执行 apk update && apk upgrade。" ;;
+        *) xm_error '不支持的系统，未执行更新。'; return 1 ;;
+    esac
+    xm_warning '仅升级当前软件仓库中的软件包；升级可能重启服务或需要稍后重启机器。脚本不会自动重启机器，系统包变更无法通用回滚。'
+    xm_confirm '确认更新系统软件包？' || return 2
+    platform_system_update || return $?
+    xm_success '系统软件包更新完成。'
+}
+
 xm_dispatch() {
     local command=${1:-menu} result
     (($# == 0)) || shift
@@ -690,6 +707,7 @@ xm_dispatch() {
         install) xm_install "$@" ;;
         upgrade) xm_upgrade "$@" ;;
         update-manager) xm_update_manager "$@" ;;
+        update-system) xm_update_system "$@" ;;
         rollback) xm_rollback "$@" ;;
         list) xm_list "$@" ;;
         add) xm_add "$@" ;;
@@ -918,7 +936,7 @@ xm_menu_add() {
             xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'www.cloudflare.com' || return 2
             XM_TARGET="${XM_SNI}:443"
             xm_menu_validate_field target "$XM_TARGET" || return 1
-            xm_info "REALITY 目标自动设置为 $XM_TARGET；需要其他目标时可在节点更多配置中修改。"
+            xm_info "REALITY 目标自动设置为 ${XM_TARGET}；需要其他目标时可在节点更多配置中修改。"
             xm_info 'UUID、REALITY 密钥与 ShortID 已随机生成，秘密保持隐藏。'
             xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_SNI" "$XM_TARGET" "$(jq -r .uuid <<< "$XM_MENU_NODE")" "$(jq -r .private_key <<< "$XM_MENU_NODE")" "$(jq -r .public_key <<< "$XM_MENU_NODE")" "$(jq -r .short_id <<< "$XM_MENU_NODE")"
             ;;
@@ -933,7 +951,7 @@ xm_menu_add() {
             xm_menu_field XM_SNI sni 'REALITY SNI（域名/IPv4）' 'www.cloudflare.com' || return 2
             XM_TARGET="${XM_SNI}:443"
             xm_menu_validate_field target "$XM_TARGET" || return 1
-            xm_info "REALITY 目标自动设置为 $XM_TARGET；需要其他目标时可在节点更多配置中修改。"
+            xm_info "REALITY 目标自动设置为 ${XM_TARGET}；需要其他目标时可在节点更多配置中修改。"
             xm_menu_field XM_PATH path 'XHTTP 路径（/开头，字母数字/_-）' "$XM_PATH" || return 2
             xm_menu_field XM_MODE mode 'XHTTP 模式（auto/packet-up/stream-up/stream-one）' packet-up || return 2
             xm_info 'UUID、REALITY 密钥与 ShortID 已随机生成，秘密保持隐藏。'
@@ -1075,16 +1093,17 @@ xm_menu_render() {
     printf '\n%s核心管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
     if [[ $wide == 1 ]]; then xm_ui_pair 1 '安装核心' 2 '版本升级'; xm_ui_pair 3 '核心回退' 4 '脚本更新'
     else xm_ui_item 1 '安装核心'; xm_ui_item 2 '版本升级'; xm_ui_item 3 '核心回退'; xm_ui_item 4 '脚本更新'; fi
+    xm_ui_item 5 '系统更新'
     printf '\n%s节点管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-    if [[ $wide == 1 ]]; then xm_ui_pair 5 '节点管理' 6 '添加节点'; xm_ui_pair 7 '删除节点' 8 '分享链接'
-    else xm_ui_item 5 '节点管理'; xm_ui_item 6 '添加节点'; xm_ui_item 7 '删除节点'; xm_ui_item 8 '分享链接'; fi
+    if [[ $wide == 1 ]]; then xm_ui_pair 6 '节点管理' 7 '添加节点'; xm_ui_pair 8 '删除节点' 9 '分享链接'
+    else xm_ui_item 6 '节点管理'; xm_ui_item 7 '添加节点'; xm_ui_item 8 '删除节点'; xm_ui_item 9 '分享链接'; fi
     printf '\n%s运行维护%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-    if [[ $wide == 1 ]]; then xm_ui_pair 9 '服务操作' 10 '查看日志'; else xm_ui_item 9 '服务操作'; xm_ui_item 10 '查看日志'; fi
-    xm_ui_item 11 '运行诊断'
+    if [[ $wide == 1 ]]; then xm_ui_pair 10 '服务操作' 11 '查看日志'; else xm_ui_item 10 '服务操作'; xm_ui_item 11 '查看日志'; fi
+    xm_ui_item 12 '运行诊断'
     printf '\n%s数据管理%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-    if [[ $wide == 1 ]]; then xm_ui_pair 12 '导出配置' 13 '导入配置'; else xm_ui_item 12 '导出配置'; xm_ui_item 13 '导入配置'; fi
+    if [[ $wide == 1 ]]; then xm_ui_pair 13 '导出配置' 14 '导入配置'; else xm_ui_item 13 '导出配置'; xm_ui_item 14 '导入配置'; fi
     printf '\n%s危险操作%s\n' "$XM_UI_BLUE" "$XM_UI_RESET" >&2
-    xm_ui_item 14 '完全卸载'
+    xm_ui_item 15 '完全卸载'
     printf '\n' >&2; xm_ui_item 0 '退出脚本'
     printf '\n' >&2
 }
@@ -1102,16 +1121,17 @@ xm_menu() {
             2) xm_menu_upgrade ;;
             3) xm_dispatch rollback ;;
             4) xm_dispatch update-manager && return 0 ;;
-            5) xm_menu_node view ;;
-            6) xm_menu_add ;;
-            7) xm_menu_node delete ;;
-            8) xm_menu_node share ;;
-            9) xm_menu_service ;;
-            10) xm_dispatch logs ;;
-            11) xm_dispatch diagnose ;;
-            12) xm_menu_ready && xm_read XM_FILE '导出配置绝对路径' "/root/xray-manager-export-$(date +%Y%m%d-%H%M%S).json" && xm_dispatch export "$XM_FILE" ;;
-            13) xm_menu_ready && xm_read XM_FILE '导入配置绝对路径' '' '选择已有导出文件；:q 取消' && xm_dispatch import "$XM_FILE" ;;
-            14) xm_dispatch uninstall && { xm_pause; return 0; } ;;
+            5) xm_dispatch update-system ;;
+            6) xm_menu_node view ;;
+            7) xm_menu_add ;;
+            8) xm_menu_node delete ;;
+            9) xm_menu_node share ;;
+            10) xm_menu_service ;;
+            11) xm_dispatch logs ;;
+            12) xm_dispatch diagnose ;;
+            13) xm_menu_ready && xm_read XM_FILE '导出配置绝对路径' "/root/xray-manager-export-$(date +%Y%m%d-%H%M%S).json" && xm_dispatch export "$XM_FILE" ;;
+            14) xm_menu_ready && xm_read XM_FILE '导入配置绝对路径' '' '选择已有导出文件；:q 取消' && xm_dispatch import "$XM_FILE" ;;
+            15) xm_dispatch uninstall && { xm_pause; return 0; } ;;
             *) xm_error '选择无效，请输入菜单编号。' ;;
         esac
         xm_pause

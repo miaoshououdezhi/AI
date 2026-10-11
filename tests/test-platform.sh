@@ -39,6 +39,104 @@ expect_fail platform_port_available 65536
 expect_fail platform_port_available '80;id'
 expect_fail platform_logs '50;id'
 expect_fail platform_fetch_core 'v1.0.0;id' "$TEST_ROOT/bad-version"
+# System update uses only in-process package stubs. Never invoke a host package
+# manager, even if a regression bypasses the XM_ROOT/root guard.
+run_system_update_guard() (
+    apt-get() { printf 'unexpected apt-get\n' >> "$TEST_ROOT/update-commands"; return 99; }
+    apk() { printf 'unexpected apk\n' >> "$TEST_ROOT/update-commands"; return 99; }
+    platform_system_update "$@"
+)
+: > "$TEST_ROOT/update-commands"
+expect_fail run_system_update_guard
+grep -q 'XM_ROOT' "$TEST_ROOT/failure.stderr" || fail 'system update did not reject XM_ROOT'
+[[ ! -s $TEST_ROOT/update-commands ]] || fail 'system update reached a package manager in XM_ROOT mode'
+expect_fail run_system_update_guard unexpected
+grep -q '不接受参数' "$TEST_ROOT/failure.stderr" || fail 'system update accepted arguments'
+[[ ! -s $TEST_ROOT/update-commands ]] || fail 'system update reached a package manager with arguments'
+
+run_system_update_stub() (
+    # Permit the fixture root only here, after testing the production guard.
+    _platform_real() { printf 'real-check\n' >> "$TEST_ROOT/update-gates"; return "${TEST_REAL_STATUS:-0}"; }
+    apt-get() {
+        printf 'apt-get:%s:frontend=%s\n' "$*" "${DEBIAN_FRONTEND:-}" >> "$TEST_ROOT/update-commands"
+        printf 'apt stdout: %s\n' "$*"
+        printf 'apt stderr: %s\n' "$*" >&2
+        case "$*:$TEST_FAIL_STAGE" in
+            '--error-on=any update:update') return 17 ;;
+            '--error-on=any update:strict-update')
+                printf 'E: Failed to fetch fixture repository index\n' >&2
+                return 100 ;;
+            'upgrade --with-new-pkgs -y:upgrade') return 23 ;;
+        esac
+    }
+    apk() {
+        printf 'apk:%s\n' "$*" >> "$TEST_ROOT/update-commands"
+        printf 'apk stdout: %s\n' "$*"
+        printf 'apk stderr: %s\n' "$*" >&2
+        case "$*:$TEST_FAIL_STAGE" in update:update) return 19 ;; upgrade:upgrade) return 29 ;; esac
+    }
+    platform_system_update > "$TEST_ROOT/update.stdout" 2> "$TEST_ROOT/update.stderr"
+)
+for fixture in 'debian 12' 'debian 13' 'alpine 3.23.4' 'alpine 3.24.0'; do
+    read -r id ver <<< "$fixture"
+    printf 'ID=%s\nVERSION_ID="%s"\n' "$id" "$ver" > "$XM_ROOT/etc/os-release"
+    : > "$TEST_ROOT/update-commands"
+    : > "$TEST_ROOT/update-gates"
+    TEST_FAIL_STAGE='' run_system_update_stub || fail "$id system update failed with package stubs"
+    [[ $(cat "$TEST_ROOT/update-gates") == real-check ]] || fail "$id did not run real/root guard first"
+    if [[ $id == debian ]]; then
+        [[ $(cat "$TEST_ROOT/update-commands") == $'apt-get:--error-on=any update:frontend=\napt-get:upgrade --with-new-pkgs -y:frontend=noninteractive' ]] || fail 'Debian update command order or flags'
+        grep -q 'apt stdout: upgrade --with-new-pkgs -y' "$TEST_ROOT/update.stdout" || fail 'Debian stdout hidden'
+        grep -q 'apt stderr: upgrade --with-new-pkgs -y' "$TEST_ROOT/update.stderr" || fail 'Debian stderr hidden'
+    else
+        [[ $(cat "$TEST_ROOT/update-commands") == $'apk:update\napk:upgrade' ]] || fail 'Alpine update command order or flags'
+        grep -q 'apk stdout: upgrade' "$TEST_ROOT/update.stdout" || fail 'Alpine stdout hidden'
+        grep -q 'apk stderr: upgrade' "$TEST_ROOT/update.stderr" || fail 'Alpine stderr hidden'
+    fi
+    for stage in update upgrade; do
+        : > "$TEST_ROOT/update-commands"
+        if TEST_FAIL_STAGE=$stage run_system_update_stub; then fail "$id $stage failure returned success"; else result=$?; fi
+        if [[ $id == debian ]]; then
+            [[ $result -eq $([[ $stage == update ]] && printf 17 || printf 23) ]] || fail 'Debian failure exit status lost'
+            grep -q "APT 软件包.*失败（退出码 ${result}）" "$TEST_ROOT/update.stderr" || fail 'Debian failure stage hidden'
+        else
+            [[ $result -eq $([[ $stage == update ]] && printf 19 || printf 29) ]] || fail 'Alpine failure exit status lost'
+            grep -q "APK 软件包.*失败（退出码 ${result}）" "$TEST_ROOT/update.stderr" || fail 'Alpine failure stage hidden'
+        fi
+        if [[ $stage == update ]]; then
+            [[ $(wc -l < "$TEST_ROOT/update-commands") -eq 1 ]] || fail "$id upgraded after index failure"
+        fi
+    done
+    if [[ $id == debian ]]; then
+        : > "$TEST_ROOT/update-commands"
+        if TEST_FAIL_STAGE=strict-update run_system_update_stub; then fail 'Debian partial index failure returned success'; else result=$?; fi
+        [[ $result -eq 100 ]] || fail 'Debian partial index failure exit status lost'
+        [[ $(cat "$TEST_ROOT/update-commands") == 'apt-get:--error-on=any update:frontend=' ]] || fail 'Debian upgraded after a partial index failure'
+        grep -q 'Failed to fetch fixture repository index' "$TEST_ROOT/update.stderr" || fail 'Debian repository failure output hidden'
+        grep -q 'APT 软件包索引更新失败（退出码 100）' "$TEST_ROOT/update.stderr" || fail 'Debian strict index failure stage hidden'
+    fi
+done
+printf 'ID=debian\nVERSION_ID=12\n' > "$XM_ROOT/etc/os-release"
+: > "$TEST_ROOT/update-commands"
+if TEST_FAIL_STAGE='' TEST_REAL_STATUS=7 run_system_update_stub; then fail 'root guard failure returned success'; else result=$?; fi
+[[ $result -ne 0 && ! -s $TEST_ROOT/update-commands ]] || fail 'root guard failure reached a package manager'
+printf 'ID=debian\nVERSION_ID=11\n' > "$XM_ROOT/etc/os-release"
+: > "$TEST_ROOT/update-commands"
+if TEST_FAIL_STAGE='' run_system_update_stub; then fail 'unsupported system update succeeded'; fi
+grep -q '不支持的系统' "$TEST_ROOT/update.stderr" || fail 'unsupported system error missing'
+[[ ! -s $TEST_ROOT/update-commands ]] || fail 'unsupported system reached a package manager'
+run_system_update_unknown() (
+    _platform_real() { return 0; }
+    platform_detect() { XM_OS=unknown; }
+    apt-get() { printf 'unexpected apt-get\n' >> "$TEST_ROOT/update-commands"; return 99; }
+    apk() { printf 'unexpected apk\n' >> "$TEST_ROOT/update-commands"; return 99; }
+    platform_system_update
+)
+expect_fail run_system_update_unknown
+grep -q '不支持的系统：unknown。' "$TEST_ROOT/failure.stderr" || fail 'unknown OS fallback diagnostic'
+[[ ! -s $TEST_ROOT/update-commands ]] || fail 'unknown OS fallback reached a package manager'
+printf 'ID=alpine\nVERSION_ID=3.23.4\n' > "$XM_ROOT/etc/os-release"
+printf 'PASS: guarded system update, Debian/Alpine order, output, failure status and unsupported OS\n'
 # Refuse foreign directories and symlink ancestors without touching their contents.
 (
     unset XM_HOME XM_ETC XM_DATA XM_LOG XM_BIN
@@ -235,7 +333,7 @@ printf '268435456\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.max"
 printf '67108864\n' > "$XM_ROOT/sys/fs/cgroup/work/memory.current"
 printf '150000 100000\n' > "$XM_ROOT/sys/fs/cgroup/work/cpu.max"
 platform_system_info > "$TEST_ROOT/overview"
-[[ $(wc -l < "$TEST_ROOT/overview") == 6 ]] || fail 'overview keys/rows'
+[[ $(wc -l < "$TEST_ROOT/overview") -eq 6 ]] || fail 'overview keys/rows'
 grep -q 'Memory.*64.0 MiB / 256.0 MiB' "$TEST_ROOT/overview" || fail 'cgroup memory limit/current ignored'
 grep -q 'CPU.*2 核' "$TEST_ROOT/overview" || fail 'effective CPU quota ignored'
 grep -Fq '$(touch /should-not-run)' "$TEST_ROOT/overview" || fail 'OS literal not preserved as data'

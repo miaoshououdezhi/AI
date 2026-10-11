@@ -124,13 +124,23 @@ python3 - "$TEST_ROOT/wide.log" <<'PYCOLUMNS'
 import sys
 lines=open(sys.argv[1]).read().splitlines()
 positions=[]
-for right in (2,4,6,8,10,13):
+for right in (2,4,7,9,11,14):
     matches=[line.index('[%s]'%right) for line in lines if '[%s]'%right in line]
     assert len(matches)==1
     positions.extend(matches)
 assert len(set(positions))==1,positions
 PYCOLUMNS
 [[ $? == 0 ]] || fail 'wide menu second column alignment'
+python3 - "$TEST_ROOT/wide.log" "$TEST_ROOT/narrow.log" <<'PYMENU'
+import re,sys
+expected=['安装核心','版本升级','核心回退','脚本更新','系统更新','节点管理','添加节点','删除节点','分享链接','服务操作','查看日志','运行诊断','导出配置','导入配置','完全卸载']
+for path in sys.argv[1:]:
+    menu=open(path).read()
+    entries={int(num):label for num,label in re.findall(r'\[(\d+)\]\s+([^\s\[]+)',menu)}
+    assert [entries.get(i) for i in range(1,16)]==expected,(path,entries)
+    assert entries.get(0)=='退出脚本',(path,entries)
+PYMENU
+[[ $? == 0 ]] || fail 'wide/narrow main menu numbers and labels'
 (
     platform_system_info() { printf 'Host\t'; printf '长%.0s' {1..80}; printf '\033[31m\n'; }
     COLUMNS=32 xm_menu_render 2> "$TEST_ROOT/truncated.log"
@@ -252,6 +262,43 @@ pass 'REALITY and XHTTP ask SNI once, use SNI:443 and validate the resulting nod
 # Use the real dispatcher/schedule functions, replacing only platform effects.
 # shellcheck disable=SC1090
 source <(sed -n '/^xm_dispatch() {/,/^}/p' "$TEST_REPO/xray-manager.sh")
+(
+    TEST_UPDATE_CALL="$TEST_ROOT/system-update-call"
+    TEST_ALLOW_ROOT=1 TEST_OS=debian TEST_PLATFORM_STATUS=0
+    xm_require_root() { [[ $TEST_ALLOW_ROOT == 1 ]]; }
+    platform_detect() { [[ $TEST_OS != invalid ]] || return 1; XM_OS=$TEST_OS; XM_OS_VERSION=13; }
+    platform_system_update() { printf '%s\n' "$XM_OS" >> "$TEST_UPDATE_CALL"; return "$TEST_PLATFORM_STATUS"; }
+    if xm_dispatch update-system extra >/dev/null 2>&1; then fail 'system update accepted argument'; else [[ $? == 2 ]] || fail 'system update argument status'; fi
+    [[ ! -e $TEST_UPDATE_CALL ]] || fail 'invalid argument reached system updater'
+    if xm_main --yes update-system >/dev/null 2>&1; then fail 'XM_ROOT system update permitted'; fi
+    [[ ! -e $TEST_UPDATE_CALL ]] || fail 'sandbox reached system updater'
+    XM_ROOT=
+    TEST_ALLOW_ROOT=0
+    if xm_main --yes update-system >/dev/null 2>&1; then fail 'non-root system update permitted'; fi
+    [[ ! -e $TEST_UPDATE_CALL ]] || fail 'root check reached system updater'
+    TEST_ALLOW_ROOT=1 TEST_OS=invalid
+    if xm_main --yes update-system >/dev/null 2>&1; then fail 'unsupported OS system update permitted'; fi
+    [[ ! -e $TEST_UPDATE_CALL ]] || fail 'OS check reached system updater'
+    TEST_OS=debian XM_YES=0
+    if xm_dispatch update-system </dev/null >/dev/null 2> "$TEST_ROOT/system-no-confirm.log"; then fail 'noninteractive update without --yes permitted'; else [[ $? == 2 ]] || fail 'noninteractive confirmation status'; fi
+    [[ ! -e $TEST_UPDATE_CALL ]] || fail 'missing confirmation reached system updater'
+    xm_confirm() { local answer; [[ $XM_YES == 1 ]] && return 0; IFS= read -r answer || return 2; xm_yes "$answer" || return 2; }
+    printf 'n\n' > "$TEST_ROOT/input"
+    if xm_dispatch update-system < "$TEST_ROOT/input" >/dev/null 2>&1; then fail 'declined system update permitted'; else [[ $? == 2 ]] || fail 'declined system update status'; fi
+    [[ ! -e $TEST_UPDATE_CALL ]] || fail 'decline reached system updater'
+    printf 'YeS\n' > "$TEST_ROOT/input"
+    xm_dispatch update-system < "$TEST_ROOT/input" >/dev/null 2> "$TEST_ROOT/system-debian.log" || fail 'confirmed Debian system update'
+    [[ $(cat "$TEST_UPDATE_CALL") == debian ]] || fail 'Debian update not dispatched exactly once'
+    grep -Fq 'apt-get --error-on=any update && DEBIAN_FRONTEND=noninteractive apt-get upgrade --with-new-pkgs -y' "$TEST_ROOT/system-debian.log" || fail 'Debian command not shown before confirmation'
+    grep -Fq '无法通用回滚' "$TEST_ROOT/system-debian.log" || fail 'system update consequence missing'
+    TEST_OS=alpine
+    xm_main --yes update-system >/dev/null 2> "$TEST_ROOT/system-alpine.log" || fail 'Alpine --yes system update'
+    [[ $(cat "$TEST_UPDATE_CALL") == $'debian\nalpine' ]] || fail 'Alpine update not dispatched exactly once'
+    grep -Fq 'apk update && apk upgrade' "$TEST_ROOT/system-alpine.log" || fail 'Alpine command not shown'
+    TEST_PLATFORM_STATUS=23
+    if xm_main --yes update-system >/dev/null 2>&1; then fail 'platform failure hidden'; else [[ $? == 23 ]] || fail 'platform failure code lost'; fi
+) || fail 'system update CLI safety fixture'
+pass 'system update CLI rejects sandbox/root/OS/arguments, requires confirmation, shows commands and propagates failure'
 TEST_CHECK_LOCK=0
 platform_restart_schedule() {
     if [[ $TEST_CHECK_LOCK == 1 && -e /proc/self/fd/$XM_LOCK_FD ]]; then fail 'scheduler platform inherited manager lock'; fi
@@ -302,12 +349,12 @@ pass 'schedule strict time, y confirmation, decline, and stopped-core skip'
     xm_menu_node() { printf 'node-%s\n' "$1" >> "$TEST_ROOT/routes"; }
     xm_menu_add() { printf 'add\n' >> "$TEST_ROOT/routes"; }
     xm_menu_service() { printf 'service\n' >> "$TEST_ROOT/routes"; }
-    printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n/tmp/export.json\n13\n/tmp/import.json\n14\n0\n' > "$TEST_ROOT/route-input"
+    printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n/tmp/export.json\n14\n/tmp/import.json\n15\n0\n' > "$TEST_ROOT/route-input"
     xm_menu < "$TEST_ROOT/route-input" >/dev/null 2> "$TEST_ROOT/route-log" || fail 'main menu route loop'
-    printf 'install\nupgrade\nrollback\nupdate-manager\nnode-view\nadd\nnode-delete\nnode-share\nservice\nlogs\ndiagnose\nexport\nimport\nuninstall\n' > "$TEST_ROOT/expected-routes"
+    printf 'install\nupgrade\nrollback\nupdate-manager\nupdate-system\nnode-view\nadd\nnode-delete\nnode-share\nservice\nlogs\ndiagnose\nexport\nimport\nuninstall\n' > "$TEST_ROOT/expected-routes"
     cmp "$TEST_ROOT/routes" "$TEST_ROOT/expected-routes" || fail 'main menu numbering mismatches handlers'
 ) || fail 'main menu dispatch fixture'
-pass 'main menu numbers 1..14 route to every intended handler'
+pass 'main menu numbers 1..15 route to every intended handler'
 # Selection keeps full data/identity while only the display copy is cropped.
 xm_dispatch() { printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$TEST_CALL"; }
 state_empty v26.3.27 > "$XM_STATE"
