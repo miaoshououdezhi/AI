@@ -1,11 +1,11 @@
-name: Verify candidate safe Alpine uninstall
+name: Verify public scheduled system update
 on:
   push:
     branches: [codex/system-update-schedule-public-smoke-20261011]
 permissions:
   contents: read
 jobs:
-  candidate-alpine-uninstall:
+  public-alpine-install:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -13,35 +13,96 @@ jobs:
       matrix:
         image: ['alpine:3.23', 'alpine:3.24']
     steps:
-      - name: Exact candidate install, update and safe complete uninstall
+      - name: Public install, live scheduled update, preservation and uninstall
         env:
-          EXPECTED_CANDIDATE: aae1af83f8ca51c10102099e7ee38ed81b83f324
+          EXPECTED_MAIN: 65bbb3322cf58b36f20f7850ea9c77a0eca3ba0b
           EXPECTED_RUNTIME: b34b24179c67f9c7d0ad48ca40d26eeb4f6903f0
           IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
           docker run --rm --init --cap-add NET_ADMIN --cap-add SYS_PTRACE \
-            -e EXPECTED_CANDIDATE -e EXPECTED_RUNTIME "$IMAGE" sh -ec '
+            -e EXPECTED_MAIN -e EXPECTED_RUNTIME "$IMAGE" sh -ec '
               apk add --no-cache bash openrc wget ca-certificates curl jq
               mkdir -p /run/openrc
               printf "default\n" > /run/openrc/softlevel
               rc-service loopback start
               sort /etc/apk/world > /tmp/baseline-world
-              curl -fsSL "https://raw.githubusercontent.com/miaoshououdezhi/AI/$EXPECTED_CANDIDATE/deploy.sh" > /tmp/candidate.sh
-              grep -F "AI/archive/$EXPECTED_RUNTIME.tar.gz" /tmp/candidate.sh
-              sh /tmp/candidate.sh
+              check_main() {
+                curl -fsSL https://api.github.com/repos/miaoshououdezhi/AI/git/ref/heads/main > /tmp/main-ref.json
+                test "$(jq -r .ref /tmp/main-ref.json)" = refs/heads/main
+                test "$(jq -r .object.type /tmp/main-ref.json)" = commit
+                test "$(jq -r .object.sha /tmp/main-ref.json)" = "$EXPECTED_MAIN"
+              }
+              check_main
+              wget -O /tmp/install-public.sh https://raw.githubusercontent.com/miaoshououdezhi/AI/main/deploy.sh
+              curl -fsSL "https://raw.githubusercontent.com/miaoshououdezhi/AI/$EXPECTED_MAIN/deploy.sh" > /tmp/install-pinned.sh
+              cmp /tmp/install-public.sh /tmp/install-pinned.sh
+              sh -n /tmp/install-public.sh
+              grep -F "AI/archive/$EXPECTED_RUNTIME.tar.gz" /tmp/install-public.sh
+              sh /tmp/install-public.sh
               curl -fsSL "https://github.com/miaoshououdezhi/AI/archive/$EXPECTED_RUNTIME.tar.gz" -o /tmp/runtime.tar.gz
               mkdir /tmp/expected-runtime
               tar -xzf /tmp/runtime.tar.gz -C /tmp/expected-runtime --strip-components=1
-              for file in xray-manager.sh lib/platform.sh; do cmp "/tmp/expected-runtime/$file" "/opt/xray-manager/$file"; done
+              verify_code() {
+                for file in xray-manager.sh install.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xray-manager-system-update.service assets/xray-manager-system-update.timer assets/xray-manager-system-update.openrc assets/xray-manager-system-update.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc; do
+                  cmp "/tmp/expected-runtime/$file" "/opt/xray-manager/$file" || return 1
+                done
+              }
+              verify_code
               xy diagnose
+              xy service status
+              xy system-update-schedule status | tee /tmp/default-status
+              test "$(cut -f1 /tmp/default-status)" = disabled
+              test "$(cut -f2 /tmp/default-status)" = manual
+              printf "5\n0\n0\n" | xy > /tmp/menu.log 2>&1
+              for label in 系统更新 立即更新 每天更新 每周更新 每月更新 不定时; do grep -F "$label" /tmp/menu.log; done
+              sha256sum /etc/xray-manager/state.json /etc/xray-manager/config.json /opt/xray-manager/bin/xray > /tmp/preserved.sha256
+              for period in weekly monthly; do
+                xy --yes system-update-schedule set "$period" 04:00
+                xy system-update-schedule status > /tmp/status
+                test "$(cut -f1 /tmp/status)" = enabled
+                test "$(cut -f2 /tmp/status)" = "$period"
+                test "$(cut -f3 /tmp/status)" = 04:00
+                test "$(stat -c %a /etc/xray-manager/system-update-schedule)" = 600
+                rc-service xray-manager-system-update status
+              done
+              target_time=$(python3 -c "import datetime; print((datetime.datetime.now()+datetime.timedelta(minutes=2)).strftime(\"%H:%M\"))")
+              xy --yes system-update-schedule set daily "$target_time"
+              xy system-update-schedule status | tee /tmp/status
+              test "$(cut -f1 /tmp/status)" = enabled
+              test "$(cut -f2 /tmp/status)" = daily
+              test "$(cut -f3 /tmp/status)" = "$target_time"
+              cp /etc/xray-manager/system-update-schedule /tmp/preserved-schedule
+              xy --yes update-manager
+              cmp /tmp/preserved-schedule /etc/xray-manager/system-update-schedule
+              sha256sum -c /tmp/preserved.sha256
+              verify_code
+              rc-service xray-manager-system-update status
+              elapsed=0
+              until grep -q "定时系统软件包更新完成" /var/log/xray-manager/system-update-schedule.log; do
+                test "$elapsed" -lt 210
+                rc-service xray-manager-system-update status
+                sleep 5
+                elapsed=$((elapsed+5))
+              done
+              cat /var/log/xray-manager/system-update-schedule.log
+              sha256sum -c /tmp/preserved.sha256
+              xy diagnose
+              xy service status
+              xy --yes system-update-schedule disable
+              xy system-update-schedule status > /tmp/off-status
+              test "$(cut -f1 /tmp/off-status)" = disabled
+              test "$(cut -f2 /tmp/off-status)" = manual
+              test ! -e /etc/xray-manager/system-update-schedule
+              test ! -e /etc/init.d/xray-manager-system-update
+              test ! -e /etc/runlevels/default/xray-manager-system-update
               xy --yes update-system
+              sha256sum -c /tmp/preserved.sha256
+              verify_code
+              check_main
               xy --yes system-update-schedule set weekly 04:00
               rc-service xray-manager-system-update status
               jq -r ".baseline[]" /etc/xray-manager/dependency-ledger.json | sort > /tmp/baseline-packages
-              bash -c "source /opt/xray-manager/lib/common.sh; source /opt/xray-manager/lib/platform.sh; platform_detect; _platform_dependency_plan /etc/xray-manager/dependency-ledger.json" | tee /tmp/safe-package-plan
-              test -s /tmp/safe-package-plan
-              xargs apk del --simulate -- < /tmp/safe-package-plan
               xy --yes uninstall
               apk info | sort > /tmp/remaining-packages
               test -z "$(comm -23 /tmp/baseline-packages /tmp/remaining-packages)"
@@ -54,6 +115,8 @@ jobs:
               test ! -e /etc/runlevels/default/xray-manager-system-update
               test ! -e /run/xray-manager-system-update.pid
               test ! -e /var/log/xray-manager/system-update-schedule.log
-              printf "PASS candidate exact runtime, real update, active schedule uninstall, baseline packages preserved\n"
+              printf "PASS public main install, exact runtime, daily/weekly/monthly plan, real daily execution, manager update preservation, disable, manual update, complete uninstall\n"
             '
-# Disposable container only; no host mounts, networking or published ports.
+# Disposable container only: no host mounts, host networking or published ports.
+# Capabilities apply only to the container namespace for loopback/core identity.
+# This verifies Alpine OpenRC service operations, not full boot or ARM64 runtime.
