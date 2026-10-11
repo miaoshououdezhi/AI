@@ -1,43 +1,59 @@
-name: Diagnose Alpine package removal
+name: Verify candidate safe Alpine uninstall
 on:
   push:
     branches: [codex/system-update-schedule-public-smoke-20261011]
 permissions:
   contents: read
 jobs:
-  package-plan-diagnostics:
+  candidate-alpine-uninstall:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['alpine:3.23', 'alpine:3.24']
     steps:
-      - name: Install public main and inspect read-only package simulation
+      - name: Exact candidate install, update and safe complete uninstall
+        env:
+          EXPECTED_CANDIDATE: aae1af83f8ca51c10102099e7ee38ed81b83f324
+          EXPECTED_RUNTIME: b34b24179c67f9c7d0ad48ca40d26eeb4f6903f0
+          IMAGE: ${{ matrix.image }}
         run: |
           set -euo pipefail
-          docker run --rm --init --cap-add NET_ADMIN --cap-add SYS_PTRACE -i alpine:3.24 sh -s <<'ALPINE'
-          set -eu
-          apk add --no-cache bash openrc wget ca-certificates curl jq
-          mkdir -p /run/openrc
-          printf 'default\n' > /run/openrc/softlevel
-          rc-service loopback start
-          curl -fsSL https://raw.githubusercontent.com/miaoshououdezhi/AI/669ef32d7c73edd11a2a70292413bd1dfe1893bb/deploy.sh > /tmp/install.sh
-          sh /tmp/install.sh
-          xy --yes update-system
-          cat /etc/xray-manager/dependency-ledger.json
-          cat /etc/apk/world
-          python3 - <<'PY'
-          from pathlib import Path
-          source=Path('/opt/xray-manager/lib/platform.sh').read_text()
-          needle=" assert removed and removed<=candidates,"
-          assert source.count(needle)==1
-          source=source.replace(needle," human('信息','DIAGNOSTIC candidates='+str(sorted(candidates))+' removed='+str(sorted(removed))+' unexpected='+str(sorted(removed-candidates)))\n"+needle)
-          Path('/tmp/diagnostic-platform.sh').write_text(source)
-          PY
-          python3 - <<'PY'
-          import json,subprocess
-          j=json.load(open('/etc/xray-manager/dependency-ledger.json'))
-          names=sorted(set(j['added'])-set(j['baseline'])-{'iproute2-minimal','libelf','libmnl','iproute2'})
-          print('DIAGNOSTIC world-anchor request',names,flush=True)
-          subprocess.run(['apk','del','--simulate','--']+names,check=True)
-          PY
-          bash -c 'source /tmp/diagnostic-platform.sh; XM_OS=alpine; _platform_dependency_plan /etc/xray-manager/dependency-ledger.json' || result=$?
-          printf 'DIAGNOSTIC read-only plan exit=%s\n' "${result:-0}"
-          ALPINE
+          docker run --rm --init --cap-add NET_ADMIN --cap-add SYS_PTRACE \
+            -e EXPECTED_CANDIDATE -e EXPECTED_RUNTIME "$IMAGE" sh -ec '
+              apk add --no-cache bash openrc wget ca-certificates curl jq
+              mkdir -p /run/openrc
+              printf "default\n" > /run/openrc/softlevel
+              rc-service loopback start
+              sort /etc/apk/world > /tmp/baseline-world
+              curl -fsSL "https://raw.githubusercontent.com/miaoshououdezhi/AI/$EXPECTED_CANDIDATE/deploy.sh" > /tmp/candidate.sh
+              grep -F "AI/archive/$EXPECTED_RUNTIME.tar.gz" /tmp/candidate.sh
+              sh /tmp/candidate.sh
+              curl -fsSL "https://github.com/miaoshououdezhi/AI/archive/$EXPECTED_RUNTIME.tar.gz" -o /tmp/runtime.tar.gz
+              mkdir /tmp/expected-runtime
+              tar -xzf /tmp/runtime.tar.gz -C /tmp/expected-runtime --strip-components=1
+              for file in xray-manager.sh lib/platform.sh; do cmp "/tmp/expected-runtime/$file" "/opt/xray-manager/$file"; done
+              xy diagnose
+              xy --yes update-system
+              xy --yes system-update-schedule set weekly 04:00
+              rc-service xray-manager-system-update status
+              jq -r ".baseline[]" /etc/xray-manager/dependency-ledger.json | sort > /tmp/baseline-packages
+              bash -c "source /opt/xray-manager/lib/common.sh; source /opt/xray-manager/lib/platform.sh; platform_detect; _platform_dependency_plan /etc/xray-manager/dependency-ledger.json" | tee /tmp/safe-package-plan
+              test -s /tmp/safe-package-plan
+              xargs apk del --simulate -- < /tmp/safe-package-plan
+              xy --yes uninstall
+              apk info | sort > /tmp/remaining-packages
+              test -z "$(comm -23 /tmp/baseline-packages /tmp/remaining-packages)"
+              sort /etc/apk/world > /tmp/remaining-world
+              test -z "$(comm -23 /tmp/baseline-world /tmp/remaining-world)"
+              test ! -e /usr/local/bin/xy
+              test ! -e /etc/xray-manager
+              test ! -e /opt/xray-manager
+              test ! -e /etc/init.d/xray-manager-system-update
+              test ! -e /etc/runlevels/default/xray-manager-system-update
+              test ! -e /run/xray-manager-system-update.pid
+              test ! -e /var/log/xray-manager/system-update-schedule.log
+              printf "PASS candidate exact runtime, real update, active schedule uninstall, baseline packages preserved\n"
+            '
+# Disposable container only; no host mounts, networking or published ports.
