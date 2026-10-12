@@ -1,5 +1,5 @@
 # xray-manager-owned:1
-/var/log/xray-manager/console.log {
+/var/log/xray-manager/console.log /var/log/xray-manager/extra-console.log {
     daily
     maxsize 10M
     rotate 4
@@ -12,7 +12,7 @@
     su root xray-manager
 }
 
-/var/log/xray-manager/system-update-schedule.log {
+/var/log/xray-manager/system-update-schedule.log /var/log/xray-manager/restart-schedule.log {
     daily
     maxsize 10M
     rotate 4

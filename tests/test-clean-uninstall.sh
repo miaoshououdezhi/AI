@@ -25,6 +25,24 @@ printf 'rotated output\n' > "$XM_LOG/system-update-schedule.log.1.gz"
 printf 'external export\n' > "$tmp/export.json"
 platform_shortcut_install
 platform_clean_uninstall_preflight
+# Failed first-install cleanup has no core/state, but still needs all original
+# ownership and unknown-leaf protections. This never touches host services.
+mv "$XM_BIN" "$tmp/core-before"
+mv "$XM_ETC/state.json" "$tmp/state-before"
+platform_clean_uninstall_preflight
+printf 'unknown incomplete-install leaf\n' > "$XM_ETC/foreign.conf"
+reject platform_clean_uninstall_preflight
+[[ -f $XM_ETC/foreign.conf ]] || fail 'incomplete cleanup changed unknown leaf'
+rm "$XM_ETC/foreign.conf"
+mv "$XM_DATA/.xray-manager-owned" "$tmp/owner-before"
+reject platform_clean_uninstall_preflight
+mv "$tmp/owner-before" "$XM_DATA/.xray-manager-owned"
+ln -s "$tmp/export.json" "$XM_ETC/state.json"
+reject platform_clean_uninstall_preflight
+rm "$XM_ETC/state.json"
+mv "$tmp/core-before" "$XM_BIN"
+mv "$tmp/state-before" "$XM_ETC/state.json"
+printf 'PASS: incomplete-install preflight retains ownership, unknown-leaf and symlink gates\n'
 printf 'foreign preserved\n' > "$XM_ETC/foreign.conf"
 reject platform_clean_uninstall_preflight
 [[ $(cat "$XM_ETC/foreign.conf") == 'foreign preserved' && -f $XM_BIN ]] || fail 'foreign preflight mutation'

@@ -7,7 +7,7 @@ trap 'rm -rf "$scratch"' EXIT
 source "$repo/lib/protocol.sh"
 export OUTBOUND_TEST_CORE=${XRAY_BIN:-${XM_BIN:-}}
 "$py" - "$repo/assets/xray-outbound.py" "$scratch" <<'PY'
-import base64, copy, importlib.util, json, os, subprocess, sys
+import base64, copy, importlib.util, json, os, subprocess, sys, urllib.parse
 sys.dont_write_bytecode=True
 spec=importlib.util.spec_from_file_location("outbound",sys.argv[1]); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 scratch=sys.argv[2]
@@ -26,6 +26,31 @@ uris=[
  "vless://"+uid+"@example.com:443?security=reality&type=xhttp&pbk="+pbk+"&sid=&mode=auto&path=%2Ftest",
  "vless://"+uid+"@example.com:443?security=tls&type=ws&path=%2Ftest&host=example.com",
 ]
+# Historical whole-URI Base64 passwords are plaintext, even when they look
+# percent-escaped or contain RFC3986 separators. Preserve every character.
+passwords=["fixture%41pass", "literal%ZZ", "test/!@#:", "pass?query#fragment/@:%25", "Unicode密码 /?#@"]
+for password in passwords:
+ for endpoint in ("example.com:443", "[2001:db8::1]:443"):
+  whole="aes-128-gcm:"+password+"@"+endpoint
+  uri="ss://"+base64.urlsafe_b64encode(whole.encode()).decode().rstrip("=")+"#test%20label"
+  parsed=m.parse_uri(uri)["settings"]["servers"][0]
+  assert parsed["password"]==password and parsed["port"]==443
+  uris.append(uri)
+ # Both ordinary plaintext SIP002 and base64 userinfo also remain lossless.
+ raw="aes-128-gcm:"+password
+ for userinfo in (urllib.parse.quote(raw,safe=""), base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")):
+  parsed=m.parse_uri("ss://"+userinfo+"@example.com:443")["settings"]["servers"][0]
+  assert parsed["password"]==password
+# Encoded spiderX is another URL after the outer URI query has been decoded.
+reality=uris[7]
+for spider in ("/", "/escaped%2Fpath", "/query?q=ok%25", "/utf8%E4%B8%AD"):
+ uri=reality+"&spx="+urllib.parse.quote(spider,safe="")
+ assert m.parse_uri(uri)["streamSettings"]["realitySettings"]["spiderX"]==spider
+ uris.append(uri)
+for spider in ("/%ZZ", "/%", "/%1", "/query?q=%ZZ"):
+ try: m.parse_uri(reality+"&spx="+urllib.parse.quote(spider,safe=""))
+ except ValueError as e: assert "spiderX" in str(e)
+ else: raise AssertionError("malformed inner spiderX escape accepted")
 core=os.environ.get("OUTBOUND_TEST_CORE")
 for i,uri in enumerate(uris):
  outbound=m.parse_uri(uri)
@@ -63,7 +88,7 @@ for t in ("anytls","hysteria2","tuicv5"):
  except ValueError: pass
  else: raise AssertionError("auxiliary route accepted")
 with open(os.path.join(scratch,"uri"),"w") as f:f.write(uris[0])
-print("PASS: strict URI mapping, SS2022 key chains, rule OR, per-inbound isolation, delete and auxiliary rejection"+ ("; native outbound fixtures" if core else "; native checks SKIP: XRAY_BIN unavailable"))
+print("PASS: lossless legacy/SIP002 SS credentials, strict spiderX escapes, URI mapping, SS2022 key chains, rule OR, per-inbound isolation, delete and auxiliary rejection"+ ("; native outbound fixtures" if core else "; native checks SKIP: XRAY_BIN unavailable"))
 PY
 uri=$(cat "$scratch/uri")
 route=$(protocol_outbound_route "$uri" all '[]' '[]')

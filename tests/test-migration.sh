@@ -31,8 +31,9 @@ platform_extra_install_service() { return 0; }
 platform_extra_installed() { return 0; }
 platform_extra_discard_new() { return 0; }
 TEST_MAIN=1; TEST_EXTRA=1; TEST_EXTRA_ENABLED=1; TEST_FAIL_EXTRA_HEALTH=0; TEST_CONFIRM=1; TEST_RACE=0
-platform_service() { case $1 in status) [[ $TEST_MAIN == 1 ]] ;; start|restart) TEST_MAIN=1 ;; stop) TEST_MAIN=0 ;; enable|disable) return 0 ;; *) return 1 ;; esac; }
-platform_extra_service() { case $1 in status) [[ $TEST_EXTRA == 1 ]] ;; start|restart) TEST_EXTRA=1 ;; stop) TEST_EXTRA=0 ;; enable) TEST_EXTRA_ENABLED=1 ;; disable) TEST_EXTRA_ENABLED=0 ;; *) return 1 ;; esac; }
+TEST_MAIN_RESTARTS=0; TEST_EXTRA_RESTARTS=0
+platform_service() { case $1 in status) [[ $TEST_MAIN == 1 ]] ;; start) TEST_MAIN=1 ;; restart) TEST_MAIN=1; TEST_MAIN_RESTARTS=$((TEST_MAIN_RESTARTS+1)) ;; stop) TEST_MAIN=0 ;; enable|disable) return 0 ;; *) return 1 ;; esac; }
+platform_extra_service() { case $1 in status) [[ $TEST_EXTRA == 1 ]] ;; start) TEST_EXTRA=1 ;; restart) TEST_EXTRA=1; TEST_EXTRA_RESTARTS=$((TEST_EXTRA_RESTARTS+1)) ;; stop) TEST_EXTRA=0 ;; enable) TEST_EXTRA_ENABLED=1 ;; disable) TEST_EXTRA_ENABLED=0 ;; *) return 1 ;; esac; }
 platform_extra_enabled() { [[ $TEST_EXTRA_ENABLED == 1 ]]; }
 platform_health() { [[ $TEST_MAIN == 1 ]]; }
 platform_extra_health() { if ((TEST_FAIL_EXTRA_HEALTH>0)); then TEST_FAIL_EXTRA_HEALTH=$((TEST_FAIL_EXTRA_HEALTH-1)); return 1; fi; [[ $TEST_EXTRA == 1 ]]; }
@@ -100,12 +101,18 @@ xm_dispatch import "$scratch/main-only" >/dev/null 2>&1 || fail 'remove last ext
 xm_dispatch import "$scratch/import.json" >/dev/null 2>&1 || fail 'add first extra via import'
 [[ $TEST_MAIN == 1 && $TEST_EXTRA == 1 && $TEST_EXTRA_ENABLED == 1 ]] || fail 'first extra did not follow running main'
 # Scheduled restart must not activate either independently stopped core.
+# This service fixture represents an enabled plan at its exact local minute;
+# real due/config/time failure semantics are covered by test-schedule/review-fixes.
+platform_restart_schedule_due() { return 0; }
+TEST_MAIN_RESTARTS=0; TEST_EXTRA_RESTARTS=0
 TEST_MAIN=0; TEST_EXTRA=1
 xm_dispatch scheduled-restart >/dev/null 2>&1 || fail 'extra-only schedule'
 [[ $TEST_MAIN == 0 && $TEST_EXTRA == 1 ]] || fail 'schedule started main'
+[[ $TEST_MAIN_RESTARTS == 0 && $TEST_EXTRA_RESTARTS == 1 ]] || fail 'extra-only schedule did not exclusively restart running extra'
 TEST_MAIN=1; TEST_EXTRA=0
 xm_dispatch scheduled-restart >/dev/null 2>&1 || fail 'main-only schedule'
 [[ $TEST_MAIN == 1 && $TEST_EXTRA == 0 ]] || fail 'schedule started extra'
+[[ $TEST_MAIN_RESTARTS == 1 && $TEST_EXTRA_RESTARTS == 1 ]] || fail 'main-only schedule did not exclusively restart running main'
 pass 'first/last extra lifecycle and scheduled restart respect independent running states'
 # Renew a portable TLS pair in one draft; a mismatched private key must fail.
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$scratch/renew-key.pem" -out "$scratch/renew-cert.pem" -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' -days 3 >/dev/null 2>&1 || fail 'renewal fixture'

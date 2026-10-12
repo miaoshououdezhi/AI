@@ -64,6 +64,31 @@ XM_PYTHON="$scratch/python-ipv4" protocol_generate "$scratch/ipv4-state.json" "$
 jq -e '.inbounds[0].listen=="0.0.0.0"' "$scratch/ipv4-config.json" >/dev/null
 jq -n --slurpfile nodes "$scratch/ss.json" '{schema_version:1,nodes:$nodes}' > "$scratch/ipv6-state.json"
 reject env XM_PYTHON="$scratch/python-ipv4" REAL_TEST_PYTHON="$py" bash -c 'source "$1/lib/protocol.sh"; protocol_generate "$2" "$3"' _ "$repo" "$scratch/ipv6-state.json" "$scratch/invalid-config.json"
+# Batch validation must inspect all nodes, reject malformed roots, and reread
+# the file on every call; it grants no prior-validation/content exception.
+jq -n --slurpfile n "$scratch/ss.json" '{nodes:[($n[0]|.address="127.0.0.1"),($n[0]|.id="other"|.port=24444)]}' > "$scratch/batch.json"
+protocol_validate_nodes "$scratch/batch.json" strict
+jq '.nodes[1].password="bad"' "$scratch/batch.json" > "$scratch/bad-batch.json"
+reject protocol_validate_nodes "$scratch/bad-batch.json" strict
+cp "$scratch/bad-batch.json" "$scratch/batch.json"
+reject protocol_validate_nodes "$scratch/batch.json" strict
+reject protocol_validate_nodes "$scratch/batch.json" unknown
+printf '{"nodes":[]}{"nodes":[]}' > "$scratch/multiple.json"
+reject protocol_validate_nodes "$scratch/multiple.json"
+printf '{"nodes":null}' > "$scratch/no-list.json"
+reject protocol_validate_nodes "$scratch/no-list.json"
+printf '{"nodes":[null]}' > "$scratch/null-node.json"
+reject protocol_validate_nodes "$scratch/null-node.json"
+jq -n --slurpfile n "$scratch/ss.json" '{nodes:[range(0;129)|$n[0]]}' > "$scratch/large-batch.json"
+reject protocol_validate_nodes "$scratch/large-batch.json"
+ln -s "$scratch/empty.json" "$scratch/link.json"
+reject protocol_validate_nodes "$scratch/link.json"
+jq '.outbound_route={uri:"socks5://user:secret@example.com:DoNotLeak",mode:"all",domains:[],ips:[]}' "$scratch/ss.json" > "$scratch/secret-node.json"
+if protocol_validate_node "$(cat "$scratch/secret-node.json")" > "$scratch/redaction.log" 2>&1; then fail 'Malformed outbound accepted'; fi
+! grep -q DoNotLeak "$scratch/redaction.log" || fail 'Outbound parser exposed input'
+jq -n --slurpfile n "$scratch/secret-node.json" '{nodes:$n}' > "$scratch/secret-state.json"
+if protocol_validate_nodes "$scratch/secret-state.json" > "$scratch/redaction.log" 2>&1; then fail 'Malformed outbound batch accepted'; fi
+! grep -q DoNotLeak "$scratch/redaction.log" || fail 'Batch parser exposed input'
 printf 'PASS protocol validation, URI encoding, empty config\n'
 
 if [[ -z $core || ! -x $core ]]; then

@@ -205,15 +205,33 @@ else:raise ValueError("unknown display mode")
 ' "$1" "$2"
 }
 
-# Snapshot a regular import source once, bounded even if it grows or is swapped.
+# Snapshot a regular source once into a new private file. Directory descriptors
+# prevent an ancestor from being replaced with a symlink during export/import.
 xm_import_snapshot() {
-    "${XM_PYTHON:-python3}" - "$1" "$2" <<'PYSNAPSHOT'
+    "${XM_PYTHON:-python3}" - "$1" "$2" "${3:-导入}" <<'PYSNAPSHOT'
 import os,stat,sys
-source,target=sys.argv[1:]; src=dst=None; created=False; limit=16777216
+source,target,label=sys.argv[1:]; src=dst=parent=None; created=None; limit=16777216
+def directory(path):
+    if not path.startswith('/') or any(p in ('.','..') for p in path.split('/')):
+        raise ValueError("必须使用不含 . 或 .. 的绝对路径")
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        for part in path.split('/')[1:]:
+            if not part:continue
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd);fd=child
+        return fd
+    except BaseException:
+        os.close(fd);raise
 try:
-    src=os.open(source,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW)
-    if not stat.S_ISREG(os.fstat(src).st_mode):raise ValueError("导入源必须是普通文件")
-    dst=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600);created=True
+    source_parent=directory(os.path.dirname(source))
+    try:src=os.open(os.path.basename(source),os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW,dir_fd=source_parent)
+    finally:os.close(source_parent)
+    if not stat.S_ISREG(os.fstat(src).st_mode):raise ValueError("源必须是普通文件")
+    parent=directory(os.path.dirname(target));name=os.path.basename(target)
+    if not name:raise ValueError("目标必须是文件路径")
+    dst=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+    st=os.fstat(dst);created=(st.st_dev,st.st_ino)
     os.fchmod(dst,0o600); total=0
     while total<=limit:
         data=os.read(src,min(65536,limit+1-total))
@@ -225,16 +243,21 @@ try:
             written=os.write(dst,view)
             if written<=0:raise OSError("快照写入失败")
             view=view[written:]
+    os.fsync(dst)
 except (OSError,ValueError) as e:
     color=os.environ.get("XM_UI_RED","") if sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM","dumb")!="dumb" else ""
     if color!="\x1b[38;2;255;0;0m":color=""
-    print(color+"[错误] 导入快照失败："+str(e)+("\x1b[0m" if color else ""),file=sys.stderr)
-    if created:
-        try:os.unlink(target)
+    print(color+"[错误] "+label+"快照失败："+str(e)+("\x1b[0m" if color else ""),file=sys.stderr)
+    if created is not None:
+        try:
+            st=os.stat(name,dir_fd=parent,follow_symlinks=False)
+            if (st.st_dev,st.st_ino)==created:os.unlink(name,dir_fd=parent)
         except OSError:pass
     sys.exit(1)
 finally:
     if src is not None:os.close(src)
     if dst is not None:os.close(dst)
+    if parent is not None:os.close(parent)
 PYSNAPSHOT
 }
+xm_export_snapshot() { xm_import_snapshot "$1" "$2" 导出; }

@@ -17,6 +17,10 @@ xm_lock || fail 'lock first owner'
 if bash -c 'source "$1/lib/common.sh"; xm_lock' -- "$REPO" >/dev/null 2>&1; then fail 'concurrent lock accepted'; fi
 pass 'exclusive lock rejects competing process'
 protocol_validate_node() { jq -e '(.id|type=="string") and (.port|type=="number")' <<< "$1" >/dev/null; }
+protocol_validate_nodes() {
+    local node
+    while IFS= read -r node; do protocol_validate_node "$node" "${2:-strict}" || return 1; done < <(jq -c '.nodes[]' "$1")
+}
 protocol_has_extra() { return 1; }
 protocol_generate_extra() { printf '{"inbounds":[]}\n' > "$2"; }
 protocol_generate() { jq '{log:{loglevel:"warning"},inbounds:[],outbounds:[],test_nodes:.nodes}' "$1" > "$2"; }
