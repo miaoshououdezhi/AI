@@ -422,10 +422,10 @@ platform_logs() {
     local lines=${1:-50} source=${2:-main} name file
     [[ $lines =~ ^[0-9]+$ && ${#lines} -le 4 ]] && ((10#$lines >= 1 && 10#$lines <= 1000)) || { _platform_error '日志行数必须为 1..1000。'; return 1; }
     case $source in
-        main) name=xray-manager; file=console.log ;;
-        extra) name=xray-manager-extra; file=extra-console.log ;;
-        update) name=xray-manager-system-update; file=system-update-schedule.log ;;
-        restart) name=xray-manager-restart; file=restart-schedule.log ;;
+        main) name=xray-manager; file="console.log" ;;
+        extra) name=xray-manager-extra; file="extra-console.log" ;;
+        update) name=xray-manager-system-update; file="system-update-schedule.log" ;;
+        restart) name=xray-manager-restart; file="restart-schedule.log" ;;
         *) _platform_error '日志来源必须为 main|extra|update|restart。'; return 2 ;;
     esac
     _platform_init_available || return 1
