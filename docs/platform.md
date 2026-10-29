@@ -1,29 +1,63 @@
-# 平台与服务
+# 平台与运行维护
 
-支持 Debian 12/13（systemd）、Alpine 3.23/3.24（OpenRC），amd64/arm64。检测读取 os-release 数据，不执行它；不支持的系统、架构或未运行的 init 拒绝实际服务操作。`XM_ROOT` 只支持路径隔离测试，不能修改宿主账户、包或真实服务。
+## 系统与核心
 
-Xray 使用专属非登录账户 `xray-manager`，程序、配置、数据和日志位于 `/opt/xray-manager`、`/etc/xray-manager`、`/var/lib/xray-manager`、`/var/log/xray-manager`。核心默认固定 v26.3.27，下载官方 HTTPS ZIP 和 .dgst 校验 SHA256；拒绝归档路径穿越、链接、重复项、超限条目和错误 ELF 架构。升级和回退针对 Xray。下载失败不替换旧核心。
+支持 Debian 12 / 13（systemd）、Alpine 3.23 / 3.24（OpenRC），架构为 amd64 和 arm64。运行需要 Bash ≥ 4.4，安装器自动准备依赖。
 
-AnyTLS、Hysteria2、TUICv5 使用独立 sing-box 辅助核心，不伪装成 Xray 原生协议。辅助核心固定 1.14.2，来自 SagerNet/sing-box 官方发布，分别选择 amd64/arm64 的 glibc/musl 资产；四个归档 SHA256 固定在平台模块。先验证固定摘要，再安全读取归档并验证 ELF/版本，原子创建 binary 及私密完整性记录。已有辅助核心必须匹配本项目完整性记录，拒绝接管未知二进制。下载校验使用分块读取，避免小内存 VPS 的不必要峰值。辅助核心按需安装，未配置辅助节点时不自动启动。
+Xray 默认版本为 v26.3.27，支持选择官方版本升级及回退。AnyTLS、HY2、TUIC v5 使用按需安装的 sing-box 1.14.2。下载来自各核心的官方 HTTPS 发布资源，检查摘要、归档路径、文件类型和架构；下载或校验失败时保留旧核心。
 
-辅助服务名 `xray-manager-extra`，共用非 root 专用账户，配置 `/etc/xray-manager/extra.json`，程序 `/opt/xray-manager/bin/sing-box`。两个 systemd 服务只提供 CAP_NET_BIND_SERVICE，限制系统写入范围；sing-box 辅助服务另允许 AF_NETLINK 地址族，用于默认网络接口监测，不增加 capability，也不改变主 Xray 服务的地址族限制。OpenRC 用 setpriv 继承同等权限。服务模板安装不自动启动/启用。Shell 事务负责两核心原生校验、独立运行/启用状态恢复；辅助安装失败或首个辅助节点原生校验失败时删除本次新建的 binary/hash/unit，保留原有资源。陌生同名服务、覆盖配置、运行级别链接、PID 符号链接拒绝接管。
+## 服务与权限
 
-健康检查要求专用账户和对应 executable 的唯一稳定进程、原生配置有效，以及节点端口归属实际核心 PID。Xray 只检查其节点，Shadowsocks 检查 TCP/UDP；sing-box AnyTLS 检查 TCP，HY2/TUICv5 检查 UDP。配置检查、服务启动、客户端互通是不同证据，验证记录分别说明。日志包含 warning/error，访问日志关闭；OpenRC 原 Xray logrotate 定期检查最多4个轮转文件，并非即时硬上限。辅助和定时服务日志在受管日志目录，完全卸载会删除。
+| 项目 | 主核心 | 辅助核心 |
+| --- | --- | --- |
+| 服务名 | `xray-manager` | `xray-manager-extra` |
+| 程序 | `/opt/xray-manager/bin/xray` | `/opt/xray-manager/bin/sing-box` |
+| 配置 | `/etc/xray-manager/config.json` | `/etc/xray-manager/extra.json` |
+| 协议 | REALITY、XHTTP、SS2022、VLESS WS、SOCKS5 | AnyTLS、HY2、TUIC v5 |
 
-## 每日定时重启与入口
+两核心使用专用非登录账户 `xray-manager`。状态和配置使用受限权限，导出文件使用 `0600`。首次安装不创建节点；辅助核心在需要时安装，删除最后一个辅助节点后停用其服务。
 
-`xy` 是 root:root0755 的 `/usr/local/bin/xy`，转发参数到已安装管理器。安装在项目副作用之前预检，拒绝覆盖陌生文件、目录、符号链接或链接祖先；远程 POSIX 引导可能已安装依赖。重复安装可更新自有入口。
+配置变更先完成参数和原生配置检查，再切换文件并检查服务。失败时恢复原状态、配置和各核心原来的运行状态。停止中的核心不会因普通配置修改而启动。
 
-定时功能默认关闭。`schedule set HH:MM` 每天使用服务器本机时区；例如 `04:00`。`status` 展示启用状态、时间、时区和下次执行；`disable` 移除受管定时资源。定时入口获取管理锁，校验当前配置，重启正在运行的核心，已停止的核心跳过。Debian 用专属 service/timer，OnCalendar 每日本地时间，Persistent=false，关机漏过的任务不补执行；Alpine 用专属 Python 调度器，每15秒检查，每日期最多一次，启动所在分钟和错过的分钟均不执行。Alpine 下次时间为估算，受夏令时和系统时间调整影响。
+`xy diagnose` 检查配置一致性、核心和服务健康。程序不改写全局防火墙、SSH、DNS 或用户 crontab。服务器端口是否可访问，还取决于网络、防火墙、云安全组和客户端设置。
 
-调度器不修改用户 crontab 或外部 crond；持久调度进程关闭管理锁描述符。修改失败恢复原配置及启用/运行状态。OpenRC 停止等待已经开始的重启完成；子操作120秒超时后 TERM，30秒清理后才最终终止。专属 PID 路径及外部 conf.d/运行级别覆盖均受预检保护。
+## 定时任务
 
-## 依赖记录与完全卸载
+系统更新和核心重启计划均默认关闭，时间采用服务器本机时区，格式为 `HH:MM`。
 
-安装前获取包清单；POSIX 引导通过 `XM_DEPENDENCY_SNAPSHOT_FILE` 传递引导之前的私密 JSON 快照，平台继承它。初始快照仅使用 dpkg-query/apk 和 awk，无 Python/jq 前提。安装依赖后保存 `/etc/xray-manager/dependency-ledger.json`，分别记录原有包和实际新增包。重复安装保留初始归属，外部新装或无历史记录的包不被接管。快照/记录只作为数据解析，不 source，也不把包名作为 shell 代码。
+- 核心重启：每日执行，只重启运行中的核心；错过时间不补跑。
+- 系统更新：支持每日、每周一、每月 1 日，或仅手动；只在计划分钟执行，错过不补跑。
+- Debian 使用项目专属 systemd timer，Alpine 使用项目专属 OpenRC 调度服务。
 
-完全卸载先核对全部项目目录、已知文件、服务和链接；遇到未知文件、符号链接或共享 UID/GID 拒绝破坏性清理并说明保留位置。预检通过后停止双方核心、移除定时服务、辅助和主服务、专用账户及全局入口，删除受管程序、配置、日志、诊断日志、历史核心和已知缓存；外部导出、外部证书和系统标准父目录保留。文件按精确白名单和类型逐项删除，不对未检查目录使用递归 rm。账户仍有进程时不删除。
+Debian 系统更新先执行 `apt-get --error-on=any update`，索引全部成功后执行 `DEBIAN_FRONTEND=noninteractive apt-get upgrade --with-new-pkgs -y`。Alpine 执行 `apk update` 后执行 `apk upgrade`。软件包升级可能重启服务；脚本不自动重启机器，不能通用回滚系统包变更。
 
-最后仅尝试删除 ledger 记载的新增、当前安装、无外部已安装反向依赖的包。保留系统 init、SSH、libc、包管理器及 Debian Essential；当前用户登录 Shell 引用的 Bash 也保留。Alpine 新安装且未被使用的 Bash 可以随新增依赖删除。移除之前两次检查 apt/apk 模拟结果，删除集合必须在可移除新增集合以内，禁用全局 autoremove；共享、系统或未知历史包明确列出保留原因。包依赖检查依据系统包数据库，管理员自行安装的软件没有依赖声明时不会出现在数据库中。
+## 日志
 
-发布验证中会区分隔离的包模拟测试、真实卸载测试和服务验证；共享测试 VPS 不清除未知历史依赖，真实新装依赖清理使用隔离环境。项目不改防火墙、SSH、DNS、sysctl 或外部 cron。
+`xy logs` 默认显示主核心最近 80 行，也可选择 `extra`、`update`、`restart`。Debian 读取相应服务 journal；Alpine 使用 `/var/log/xray-manager/` 下的日志：
+
+| 日志 | 用途 |
+| --- | --- |
+| `console.log` | Xray |
+| `extra-console.log` | sing-box |
+| `system-update-schedule.log` | 系统更新 |
+| `restart-schedule.log` | 定时重启 |
+
+四类日志均配置每日检查、`maxsize 10M`、保留 4 份、压缩和数字编号轮转。核心日志为 `0640`，调度日志为 `0600`。轮转依赖周期执行，并非实时大小上限。项目轮转配置使用 `nodateext`；已有的 `-YYYYMMDD` 及 `.gz` 日期归档仍可在卸载时清理。
+
+访问日志关闭，保留警告和错误。最近的原生配置校验错误保存在受管日志目录；节点状态损坏时仍可查看日志。
+
+## 备份与恢复
+
+`state.json` 是节点状态来源，`config.json` 和 `extra.json` 由管理器生成。使用 `xy export` 备份完整节点、出站路由及 TLS PEM；导入时保留目标机器的 Xray 核心版本。
+
+升级核心后保留上一版及其版本信息，`xy rollback` 在校验通过后切换。脚本更新失败会恢复原管理代码；更新过程中收到中断信号时，可能保留代码恢复目录并显示路径。
+
+断电和 `SIGKILL` 无法触发清理。发生异常后先运行 `xy diagnose`，保留 `/etc/xray-manager/.transaction.*` 及提示的代码恢复目录，确认恢复内容后再操作服务。
+
+## 卸载范围
+
+安装器记录安装前软件包及本项目新增依赖。完全卸载先检查目录归属、文件类型、服务、账户与依赖计划，再清理项目资源。未知文件、符号链接、外部服务覆盖或共享账户资源会导致预检失败并保留现场。
+
+受管日志支持数字轮转和八位日期归档。项目外导出、证书及系统标准父目录保留。依赖删除使用包管理器模拟结果，仅删除可安全移除的已记录新增包；系统基础包、SSH、共享包和无历史记录的包保留，不执行全局 autoremove。
+
+首次安装失败且核心或状态不完整时，可重试安装；也可在完整项目目录执行 `bash xray-manager.sh --yes uninstall`，通过相同预检后清理。
