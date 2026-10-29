@@ -70,7 +70,11 @@ xm_terminal_width() {
     fi
 }
 xm_ui_heading() { printf '\n%s%s%s\n\n' "$XM_UI_CYAN" "$1" "$XM_UI_RESET" >&2; }
-xm_ui_item() { printf '%s[%s]  %s%s%s\n' "$XM_UI_BLUE" "$1" "$XM_UI_WHITE" "$2" "$XM_UI_RESET" >&2; }
+xm_ui_item() {
+    local number_gap=''
+    [[ ${#1} -gt 1 ]] || number_gap=' '
+    printf '%s[%s] %s %s%s%s\n' "$XM_UI_BLUE" "$1" "$number_gap" "$XM_UI_WHITE" "$2" "$XM_UI_RESET" >&2
+}
 xm_ui_pair() {
     # Left labels are fixed four-character Chinese captions, followed by a
     # generous column gap. User strings are never accepted as menu captions.

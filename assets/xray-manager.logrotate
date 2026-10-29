@@ -3,6 +3,7 @@
     daily
     maxsize 10M
     rotate 4
+    nodateext
     missingok
     notifempty
     compress
@@ -16,6 +17,7 @@
     daily
     maxsize 10M
     rotate 4
+    nodateext
     missingok
     notifempty
     compress
