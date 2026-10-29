@@ -62,7 +62,7 @@ def parse_uri(uri):
     need(type(port) is int and 1 <= port <= 65535, "出站端口必须为 1..65535")
     need(u.netloc.count("@") == 1, "凭据中的保留字符须进行百分号编码")
     credential = decode(u.netloc.rsplit("@", 1)[0])
-    pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True, strict_parsing=True, errors="strict")
+    pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True, strict_parsing=True, errors="strict") if u.query else []
     need(not re.search(r"%(?![0-9A-Fa-f]{2})", u.query), "URI 百分号编码无效")
     q = dict(pairs)
     need(len(q) == len(pairs), "节点链接含重复参数")
@@ -191,7 +191,7 @@ def validate_route(route):
 
 def validate_node(node):
     if "outbound_route" in node:
-        need(node.get("type") in MAIN_TYPES, "此节点由辅助核心运行，暂不支持 Xray 出站路由")
+        need(node.get("type") in MAIN_TYPES or (node.get("type")=="hysteria2" and node.get("engine")=="xray"), "此节点由辅助核心运行，暂不支持 Xray 出站路由")
         validate_route(node["outbound_route"])
 
 def augment(state, config):

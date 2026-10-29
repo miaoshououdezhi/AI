@@ -94,3 +94,37 @@ for path in sys.argv[1:]:
 print('PASS wide/narrow main menu captions share the same left column')
 PYMENU
 ) || fail 'main menu caption alignment'
+
+# Real input echo, hidden credentials, result separation and EOF restore.
+python3 - "$repo" <<'PYPROMPT'
+import errno,os,pty,select,subprocess,sys,time,termios
+for mode in ('color','no_color','dumb'):
+ master,slave=pty.openpty();env=dict(os.environ,TERM='xterm-256color');env.pop('NO_COLOR',None)
+ if mode=='no_color':env['NO_COLOR']='1'
+ if mode=='dumb':env['TERM']='dumb'
+ command='source "$1/lib/common.sh"; xm_ui_init; xm_read VALUE "普通输入"; xm_read_secret SECRET "秘密输入"; [[ $VALUE == visible-input && $SECRET == hidden-fixture ]] || exit 4; xm_ui_heading "操作结果"; xm_success "已保存"; xm_read EOF_VALUE "EOF输入"; status=$?; [[ $status == 2 ]] || exit 5; printf "END\\n" >&2'
+ p=subprocess.Popen(['bash','-c',command,'--',sys.argv[1]],stdin=slave,stderr=slave,stdout=subprocess.DEVNULL,env=env)
+ os.close(slave);data=b'';sent=0;deadline=time.monotonic()+10
+ markers=['普通输入','秘密输入','EOF输入'];answers=[b'visible-input\n',b'hidden-fixture\n',b'\x04']
+ while time.monotonic()<deadline:
+  if sent<3 and markers[sent].encode() in data and data.count(b'  > ')>sent:
+   if sent!=1 or not (termios.tcgetattr(master)[3]&termios.ECHO):
+    os.write(master,answers[sent]);sent+=1
+  if not select.select([master],[],[],.05)[0]:continue
+  try:chunk=os.read(master,8192)
+  except OSError as e:
+   if e.errno==errno.EIO:break
+   raise
+  if not chunk:break
+  data+=chunk
+ assert p.wait(timeout=2)==0 and sent==3,(mode,data)
+ os.close(master)
+ assert b'visible-input' in data and b'hidden-fixture' not in data,(mode,data)
+ assert '── 操作结果 ──'.encode() in data and '[成功] 已保存'.encode() in data,(mode,data)
+ if mode=='color':
+  assert '\x1b[38;2;0;255;255m[输入]'.encode() in data,data
+  assert b'\x1b[0m\r\nEND' in data,data
+ else:assert b'\x1b' not in data,(mode,data)
+print('PASS real PTY input/result separation, hidden secrets and EOF color reset')
+PYPROMPT
+[[ $? == 0 ]] || fail 'PTY prompt checks'

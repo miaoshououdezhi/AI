@@ -66,7 +66,11 @@ def validate(n):
     t=text(n,"type"); common={"id","name","type","port","address"}
     extras={"vless-reality":{"uuid","private_key","public_key","short_id","sni","target"},"vless-xhttp":{"uuid","private_key","public_key","short_id","sni","target","path","mode"},"shadowsocks":{"method","password"},"vless-ws":{"uuid","sni","path","tls_cert","tls_key"},"socks5":{"username","password"},"anytls":{"sni","tls_cert","tls_key","password"},"hysteria2":{"sni","tls_cert","tls_key","password"},"tuicv5":{"sni","tls_cert","tls_key","uuid","password"}}
     need(t in extras,"未知协议")
-    need(set(n)-{"outbound_route"}==common|extras[t],"节点字段缺失或含未知字段")
+    optional={"outbound_route"}
+    if t=="hysteria2":
+        optional.add("engine")
+        need(n.get("engine","sing-box") in ("xray","sing-box"),"HY2 核心字段无效")
+    need(set(n)-optional==common|extras[t],"节点字段缺失或含未知字段")
     need(bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,31}",text(n,"id"))),"节点 ID 无效")
     text(n,"name",1,128)
     p=n.get("port"); need(type(p)==int and 1<=p<=65535,"端口必须是 1..65535 整数")
@@ -113,9 +117,12 @@ def validate(n):
         need(b"does match certificate" in openssl(["x509","-noout",flag,sni],certbytes),"证书 SAN 与 SNI 不匹配")
         need(openssl(["x509","-pubkey","-noout"],certbytes)==openssl(["pkey","-passin","pass:","-pubout"],keybytes),"证书与私钥不匹配")
     elif t=="shadowsocks":
-        need(text(n,"method")=="2022-blake3-aes-128-gcm","仅支持 SS2022 AES-128-GCM")
+        method=text(n,"method")
+        sizes={"2022-blake3-aes-128-gcm":16,"2022-blake3-aes-256-gcm":32}
+        need(method in sizes,"SS2022 加密方式必须为 AES-128-GCM 或 AES-256-GCM")
+        size=sizes[method]
         pwd=text(n,"password"); raw=base64.b64decode(pwd,validate=True)
-        need(len(raw)==16 and base64.b64encode(raw).decode()==pwd,"SS2022 密码必须是 16 字节标准 Base64 密钥")
+        need(len(raw)==size and base64.b64encode(raw).decode()==pwd,"SS2022 密码必须是对应算法的 "+str(size)+" 字节标准 Base64 密钥")
 try:
     sys.dont_write_bytecode=True
     spec=importlib.util.spec_from_file_location("xray_outbound",sys.argv[3])
@@ -181,6 +188,7 @@ protocol_new() {
                 [[ -n $private ]] || private=$(openssl rand -hex 24) || return 1
                 extra=$(printf '%s\0' "$tls" "$private" | jq -Rs 'split("\u0000")|(.[0]|fromjson)+{password:.[1]}') || return 1
                 if [[ $type == tuicv5 ]]; then extra=$(printf '%s\0' "$extra" "$uid" | jq -Rs 'split("\u0000")|(.[0]|fromjson)+{uuid:.[1]}') || return 1; fi
+                if [[ $type == hysteria2 ]]; then extra=$(printf '%s' "$extra" | jq -c '.+{engine:"xray"}') || return 1; fi
             fi
             ;;
         socks5)
@@ -191,9 +199,15 @@ protocol_new() {
             extra=$(printf '%s\0' "$uid" "$private" | jq -Rs 'split("\u0000")|{username:.[0],password:.[1]}') || return 1
             ;;
         shadowsocks)
-            [[ $# -le 1 ]] || { _protocol_error 'Shadowsocks 参数过多'; return 1; }
-            private=${1:-}; [[ -n $private ]] || private=$(openssl rand -base64 16) || return 1
-            extra=$(printf '%s\0' "$private" | jq -Rs 'split("\u0000")|{method:"2022-blake3-aes-128-gcm",password:.[0]}') || return 1
+            [[ $# -le 2 ]] || { _protocol_error 'Shadowsocks 接受 [PASSWORD [METHOD]]'; return 1; }
+            local method=${2-2022-blake3-aes-128-gcm} key_bytes
+            case $method in
+                2022-blake3-aes-128-gcm) key_bytes=16 ;;
+                2022-blake3-aes-256-gcm) key_bytes=32 ;;
+                *) _protocol_error 'SS2022 加密方式必须为 AES-128-GCM 或 AES-256-GCM'; return 1 ;;
+            esac
+            private=${1:-}; [[ -n $private ]] || private=$(openssl rand -base64 "$key_bytes") || return 1
+            extra=$(printf '%s\0' "$method" "$private" | jq -Rs 'split("\u0000")|{method:.[0],password:.[1]}') || return 1
             ;;
         *) _protocol_error '未知协议'; return 1 ;;
     esac
@@ -227,7 +241,7 @@ except OSError as e:
         _protocol_error '当前服务器 IPv6 不可用，请使用 IPv4 地址或域名'; return 1
     fi
     (umask 077; : > "$output"; chmod 600 "$output" || exit 1; jq -c --arg listen "$listen" '
-        {log:{loglevel:"warning",access:"none"},inbounds:[.nodes[]|select(.type=="vless-reality" or .type=="vless-xhttp" or .type=="shadowsocks" or .type=="vless-ws" or .type=="socks5")|
+        {log:{loglevel:"warning",access:"none"},inbounds:[.nodes[]|select(.type=="vless-reality" or .type=="vless-xhttp" or .type=="shadowsocks" or .type=="vless-ws" or .type=="socks5" or (.type=="hysteria2" and .engine=="xray"))|
           {tag:("node-"+.id),listen:$listen,port:.port}+
           (if .type=="vless-reality" then
             {protocol:"vless",settings:{clients:[{id:.uuid,flow:"xtls-rprx-vision"}],decryption:"none"},streamSettings:{network:"raw",security:"reality",realitySettings:{show:false,target:.target,xver:0,serverNames:[.sni],privateKey:.private_key,shortIds:[.short_id]}}}
@@ -235,6 +249,8 @@ except OSError as e:
             {protocol:"vless",settings:{clients:[{id:.uuid}],decryption:"none"},streamSettings:{network:"xhttp",security:"reality",xhttpSettings:{path:.path,mode:.mode},realitySettings:{show:false,target:.target,xver:0,serverNames:[.sni],privateKey:.private_key,shortIds:[.short_id]}}}
           elif .type=="vless-ws" then
             {protocol:"vless",settings:{clients:[{id:.uuid}],decryption:"none"},streamSettings:{network:"ws",security:"tls",wsSettings:{path:.path},tlsSettings:{minVersion:"1.2",certificates:[{certificate:(.tls_cert|split("\n")),key:(.tls_key|split("\n"))}]}}}
+          elif .type=="hysteria2" then
+            {protocol:"hysteria",settings:{version:2,clients:[{auth:.password}]},streamSettings:{network:"hysteria",security:"tls",hysteriaSettings:{version:2},tlsSettings:{minVersion:"1.3",alpn:["h3"],certificates:[{certificate:(.tls_cert|split("\n")),key:(.tls_key|split("\n"))}]}}}
           elif .type=="socks5" then
             {protocol:"socks",settings:{auth:"password",accounts:[{user:.username,pass:.password}],udp:true}}
           else {protocol:"shadowsocks",settings:{method:.method,password:.password,network:"tcp,udp"}}
@@ -278,14 +294,20 @@ print(uri+"#"+q(n["name"]))
 protocol_engine() {
     case ${1:-} in
         vless-reality|vless-xhttp|vless-ws|shadowsocks|socks5) printf 'xray\n' ;;
-        anytls|hysteria2|tuicv5) printf 'extra\n' ;;
+        hysteria2)
+            case ${2:-sing-box} in
+                xray) printf 'xray\n' ;;
+                sing-box) printf 'extra\n' ;;
+                *) _protocol_error 'HY2 核心字段无效'; return 1 ;;
+            esac ;;
+        anytls|tuicv5) printf 'extra\n' ;;
         *) _protocol_error '未知协议'; return 1 ;;
     esac
 }
 
 protocol_has_extra() {
     [[ $# == 1 && -f $1 && ! -L $1 ]] || return 1
-    jq -e '.nodes|any(.type=="anytls" or .type=="hysteria2" or .type=="tuicv5")' "$1" >/dev/null
+    jq -e '.nodes|any(.type=="anytls" or (.type=="hysteria2" and (.engine // "sing-box")=="sing-box") or .type=="tuicv5")' "$1" >/dev/null
 }
 
 protocol_tls_read() {
@@ -333,7 +355,7 @@ except OSError as e:
     jq -e '.schema_version==1 and (.nodes|type=="array") and (.nodes|length<=128) and (.nodes|map(.id)|length==(unique|length)) and (.nodes|map(.port)|length==(unique|length))' "$1" >/dev/null || return 1
     protocol_validate_nodes "$1" "$mode" || return 1
     (umask 077; : > "$2"; chmod 600 "$2" || exit 1
-    jq --arg listen "$listen" '{log:{level:"warn",timestamp:true},inbounds:[.nodes[]|select(.type=="anytls" or .type=="hysteria2" or .type=="tuicv5")|
+    jq --arg listen "$listen" '{log:{level:"warn",timestamp:true},inbounds:[.nodes[]|select(.type=="anytls" or (.type=="hysteria2" and (.engine // "sing-box")=="sing-box") or .type=="tuicv5")|
       {type:(if .type=="tuicv5" then "tuic" else .type end),tag:("node-"+.id),listen:$listen,listen_port:.port,tls:{enabled:true,server_name:.sni,certificate:(.tls_cert|split("\n")),key:(.tls_key|split("\n"))}}+
       (if .type=="tuicv5" then {users:[{name:.id,uuid:.uuid,password:.password}],congestion_control:"cubic",zero_rtt_handshake:false,tls:{enabled:true,server_name:.sni,alpn:["h3"],certificate:(.tls_cert|split("\n")),key:(.tls_key|split("\n"))}}
        else {users:[{name:.id,password:.password}]} end)],outbounds:[{type:"direct",tag:"direct"}],route:{rules:[{ip_is_private:true,action:"reject"},{ip_cidr:["0.0.0.0/8","100.64.0.0/10","198.18.0.0/15","224.0.0.0/4","240.0.0.0/4","::/128","64:ff9b:1::/48","100::/64","ff00::/8"],action:"reject"}],final:"direct"}}' "$1" > "$2")

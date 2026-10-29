@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Common functions; sourcing this file has no filesystem or service side effects.
 export XM_PRODUCT=xray-manager
-export XM_DEFAULT_CORE_VERSION=v26.3.27
+export XM_DEFAULT_CORE_VERSION=v26.10.29
 XM_ROOT=${XM_ROOT:-}
 XM_HOME="${XM_ROOT}/opt/xray-manager"
 XM_ETC="${XM_ROOT}/etc/xray-manager"
@@ -43,8 +43,11 @@ xm_confirm() {
     local reply
     [[ $XM_YES == 1 ]] && return 0
     [[ -t 0 ]] || { xm_error '非交互模式需要 --yes 明确确认。'; return 2; }
-    printf '%s [输入 y/yes 确认，不区分大小写]：' "$1" >&2
-    IFS= read -r reply || return 2
+    xm_ui_prompt "$1" 'y/yes 确认；回车取消'
+    local status=0
+    IFS= read -r reply || status=$?
+    xm_ui_input_end
+    [[ $status == 0 ]] || return 2
     xm_yes "$reply" || { xm_info '已取消。'; return 2; }
 }
 # Terminal styling is enabled only for interactive stderr. Any NO_COLOR presence
@@ -69,7 +72,21 @@ xm_terminal_width() {
         printf '80\n'
     fi
 }
-xm_ui_heading() { printf '\n%s%s%s\n\n' "$XM_UI_CYAN" "$1" "$XM_UI_RESET" >&2; }
+xm_ui_heading() { printf '\n%s── %s ──%s\n\n' "$XM_UI_CYAN" "$1" "$XM_UI_RESET" >&2; }
+# Prompt and input occupy separate lines, even without ANSI support.
+xm_ui_prompt() {
+    printf '\n%s[输入]%s %s' "$XM_UI_CYAN" "$XM_UI_RESET" "$1" >&2
+    [[ -z ${2:-} ]] || printf ' [%s%s%s]' "$XM_UI_GREEN" "$2" "$XM_UI_RESET" >&2
+    printf '\n%s  > %s' "$XM_UI_BLUE" "$XM_UI_WHITE" >&2
+}
+xm_ui_input_end() { printf '%s\n' "$XM_UI_RESET" >&2; }
+xm_ui_fields() {
+    local label value rows
+    rows=$(xm_ui_format fields "$(xm_terminal_width)") || return 1
+    while IFS=$'\t' read -r label value; do
+        printf '    %s%s%s  %s%s%s\n' "$XM_UI_CYAN" "$label" "$XM_UI_RESET" "$XM_UI_WHITE" "$value" "$XM_UI_RESET" >&2
+    done <<< "$rows"
+}
 xm_ui_item() {
     local number_gap=''
     [[ ${#1} -gt 1 ]] || number_gap=' '
@@ -91,8 +108,11 @@ xm_read() {
     local variable=$1 prompt=$2 default=${3:-} display=${4:-${3:-}} reply
     [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
     while :; do
-        if [[ -n $display ]]; then printf '%s%s%s [%s%s%s]：' "$XM_UI_CYAN" "$prompt" "$XM_UI_RESET" "$XM_UI_GREEN" "$display" "$XM_UI_RESET" >&2; else printf '%s%s：%s' "$XM_UI_CYAN" "$prompt" "$XM_UI_RESET" >&2; fi
-        IFS= read -r reply || return 2
+        xm_ui_prompt "$prompt" "$display"
+        local status=0
+        IFS= read -r reply || status=$?
+        xm_ui_input_end
+        [[ $status == 0 ]] || return 2
         [[ $reply != :q ]] || { xm_info '已取消。'; return 2; }
         if ! xm_input_safe "$reply"; then xm_error '输入不能含终端控制字符，请重新输入。'; continue; fi
         [[ -n $reply ]] || reply=$default
@@ -104,9 +124,11 @@ xm_read_secret() {
     local variable=$1 prompt=$2 default=${3:-} reply
     [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
     while :; do
-        printf '%s%s [回车使用随机默认值，隐藏]：%s' "$XM_UI_CYAN" "$prompt" "$XM_UI_RESET" >&2
-        IFS= read -r -s reply || { printf '\n' >&2; return 2; }
-        printf '\n' >&2
+        xm_ui_prompt "$prompt" '回车随机生成；输入隐藏；:q 取消'
+        local status=0
+        IFS= read -r -s reply || status=$?
+        xm_ui_input_end
+        [[ $status == 0 ]] || return 2
         [[ $reply != :q ]] || { xm_info '已取消。'; return 2; }
         if ! xm_input_safe "$reply"; then xm_error '秘密不能含控制字符，请重新输入。'; continue; fi
         [[ -n $reply ]] || reply=$default
@@ -197,14 +219,19 @@ if mode=="overview":
 elif mode=="nodes":
     labels={"vless-reality":"reality","vless-xhttp":"xhttp","shadowsocks":"ss2022","vless-ws":"vless(ws)","socks5":"socks5","anytls":"anytls","hysteria2":"hy2","tuicv5":"tuicv5"}
     for index,n in enumerate(json.load(sys.stdin),1):
-        kind=labels.get(n["type"],"unknown");prefix="[%s] %s  "%(index,kind)
-        name=clip(n["name"],limit-cells(prefix))
-        if not name or cells(name)==0:name=clip("未知",limit-cells(prefix))
+        kind=labels.get(n["type"],"unknown")
+        name=clip(n["name"],limit-10)
+        if not name or cells(name)==0:name=clip("未知",limit-10)
         addr=clean(n["address"]);port=str(n["port"])
         suffix=("]:" if ":" in addr else ":")+port
         opening="[" if ":" in addr else ""
-        address=opening+clip(addr,limit-4-cells(opening+suffix))+suffix
-        print("\t".join((str(index),kind,name,address,clip(n["id"],limit-5))))
+        address=opening+clip(addr,limit-10-cells(opening+suffix))+suffix
+        print("\t".join((str(index),kind,name,address,clip(n["id"],limit-10))))
+elif mode=="fields":
+    for label,value in json.load(sys.stdin):
+        label=clip(label,4); value=clip(value,limit-10)
+        if not value or cells(value)==0:value="—"
+        print(label+" "*max(0,4-cells(label))+"\t"+value)
 else:raise ValueError("unknown display mode")
 ' "$1" "$2"
 }

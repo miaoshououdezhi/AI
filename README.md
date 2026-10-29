@@ -9,8 +9,8 @@
 | 系统 | Debian 12 / 13、Alpine 3.23 / 3.24 |
 | 架构 | amd64、arm64 |
 | 服务管理 | Debian 使用 systemd；Alpine 使用 OpenRC |
-| Xray 默认版本 | v26.3.27，可指定官方版本升级 |
-| 辅助核心 | sing-box 1.14.2，添加 AnyTLS / HY2 / TUIC v5 时按需安装 |
+| Xray 默认版本 | v26.10.29，可指定官方版本升级 |
+| 历史节点兼容 | 保留既有 sing-box 节点的管理及数据迁移 |
 
 安装和管理操作需要 root，依赖由安装器准备。首次安装没有节点，不开放代理监听；添加节点后，请按实际端口配置服务器防火墙和云安全组。
 
@@ -84,16 +84,14 @@ sh install.sh
 | --- | --- | --- |
 | VLESS REALITY Vision | Xray | 自动生成 UUID、密钥和 ShortID |
 | VLESS XHTTP + REALITY | Xray | 支持 packet-up、auto、stream-up、stream-one |
-| Shadowsocks 2022 | Xray | 2022-blake3-aes-128-gcm，TCP / UDP |
+| Shadowsocks 2022 | Xray | 可选 AES-128-GCM / AES-256-GCM，TCP / UDP |
 | VLESS WebSocket + TLS | Xray | 使用已有 TLS 证书与私钥 |
 | 认证 SOCKS5 | Xray | 用户名密码认证，协议本身不加密 |
-| AnyTLS | sing-box | TLS / TCP |
-| Hysteria2 / HY2 | sing-box | QUIC / UDP |
-| TUIC v5 | sing-box | QUIC / UDP |
+| Hysteria2 / HY2 | Xray | QUIC / UDP，使用 TLS 证书和私钥 |
 
-添加节点时可使用随机 ID、名称、端口及凭据；对外地址可自动探测或手动填写。REALITY / XHTTP 默认 SNI 为 `genshin.hoyoverse.com`，目标为该域名的 443 端口，可按服务器连通情况调整。
+添加 SS2022 时可选择 `2022-blake3-aes-128-gcm` 或 `2022-blake3-aes-256-gcm`，分别自动生成 16 / 32 字节 Base64 主密钥。添加节点时可使用随机 ID、名称、端口及凭据；对外地址可自动探测或手动填写。REALITY / XHTTP 默认 SNI 为 `genshin.hoyoverse.com`，目标为该域名的 443 端口，可按服务器连通情况调整。
 
-节点管理按编号显示名称、协议、地址和端口。进入详情后可修改名称、端口、对外地址、SNI 及协议专属字段。凭据默认隐藏，选择分享才输出客户端链接。保存前会检查参数、冲突和核心配置，失败时恢复原配置及服务运行状态。
+节点管理、分享和删除使用相同的编号卡片：每个节点单独一组，名称、地址和 ID 按字段对齐。详情逐行显示字段；输入使用独立的 `[输入]` 与 `>` 行，分享结果单独成区，链接保持完整。进入详情后可修改名称、端口、对外地址、SNI 及协议专属字段。凭据默认隐藏，选择分享才输出客户端链接。保存前会检查参数、冲突和核心配置，失败时恢复原配置及服务运行状态。
 
 ```sh
 xy add vless-reality node-a '我的 REALITY' 1443 server.example.com genshin.hoyoverse.com genshin.hoyoverse.com:443
@@ -105,11 +103,13 @@ xy edit node-a port 1444
 xy --yes delete node-b
 ```
 
+HY2 新节点使用 Xray；已有安装若核心版本低于 v26.10.29，请先通过“版本升级”更新核心。更新管理脚本不会强制切换现有核心，旧 HY2 节点保持原运行方式。
+
 完整协议参数及 TLS 要求见 [协议说明](docs/protocols.md)，全部命令可用 `xy help` 查看。日常凭据输入建议使用菜单，避免写入 Shell 历史或进程参数。
 
 ## 节点独立出站路由
 
-Xray 节点详情提供“添加出站路由”和“删除出站路由”。每个节点可配置一个上游，选择全部流量经上游，或仅让指定域名 / IP 经上游；其他节点保留各自设置，删除路由后恢复直连。AnyTLS、HY2、TUIC v5 不提供此功能。
+Xray 节点详情提供“设置出站 / 落地节点”和“删除出站 / 恢复直连”。链路为“客户端 → 当前节点 → 粘贴的落地节点 → 目标网站”。每个节点可配置一个上游，选择全部流量经上游，或仅让指定域名 / IP 经上游；其他节点保留各自设置，删除路由后恢复直连。新建 HY2 也支持 Xray 出站路由；历史 sing-box 节点不提供此功能。
 
 支持的上游格式及限制见 [协议说明](docs/protocols.md#出站路由)。CLI 从标准输入读取上游链接：
 
@@ -134,7 +134,7 @@ xy update-manager
 更新保留核心和节点。成功后重新运行 `xy`，加载新脚本。Xray 核心通过 `[2] 版本升级` 选择版本，或显式指定官方版本；`rollback` 切换到保存的上一版核心。
 
 ```sh
-xy upgrade v26.3.27
+xy upgrade v26.10.29
 xy rollback
 xy service status
 xy service restart

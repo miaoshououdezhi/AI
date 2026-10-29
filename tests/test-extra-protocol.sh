@@ -93,9 +93,37 @@ PY
 jq -s '{schema_version:1,nodes:.}' "$scratch/ws.json" "$scratch/socks.json" "$scratch/anytls.json" "$scratch/hysteria2.json" "$scratch/tuicv5.json" > "$scratch/state.json"
 protocol_generate "$scratch/state.json" "$scratch/xray.json"
 protocol_generate_extra "$scratch/state.json" "$scratch/extra.json"
-jq -e '.inbounds|length==2' "$scratch/xray.json" >/dev/null
-jq -e '(.inbounds|length==3) and .route.rules[0].ip_is_private' "$scratch/extra.json" >/dev/null
+jq -e '(.inbounds|length==3) and .inbounds[2].protocol=="hysteria" and .inbounds[2].settings.version==2' "$scratch/xray.json" >/dev/null
+jq -e '(.inbounds|length==2) and .route.rules[0].ip_is_private' "$scratch/extra.json" >/dev/null
 protocol_has_extra "$scratch/state.json"
+# New HY2 uses Xray; imported historical nodes keep their explicit/implicit engine.
+[[ $(jq -r .engine "$scratch/hysteria2.json") == xray ]]
+[[ $(protocol_engine hysteria2 xray) == xray && $(protocol_engine hysteria2) == extra && $(protocol_engine hysteria2 sing-box) == extra ]]
+reject protocol_engine hysteria2 unknown
+reject protocol_validate_node "$(jq '.engine="unknown"' "$scratch/hysteria2.json")"
+reject protocol_validate_node "$(jq '.engine="xray"' "$scratch/anytls.json")"
+jq -n --slurpfile n "$scratch/hysteria2.json" '{schema_version:1,nodes:$n}' > "$scratch/hy-xray-state.json"
+reject protocol_has_extra "$scratch/hy-xray-state.json"
+protocol_new shadowsocks route-target 'Route target' 25007 127.0.0.1 > "$scratch/route-target.json"
+route=$(protocol_outbound_route "$(protocol_share "$(cat "$scratch/route-target.json")")" all '[]' '[]')
+jq --argjson route "$route" '.nodes[0].outbound_route=$route' "$scratch/hy-xray-state.json" > "$scratch/hy-route-state.json"
+protocol_validate_nodes "$scratch/hy-route-state.json"
+protocol_generate "$scratch/hy-route-state.json" "$scratch/hy-route-xray.json"
+jq -e '.routing.rules|any(.inboundTag==["node-hysteria2"] and .outboundTag=="outbound-hysteria2")' "$scratch/hy-route-xray.json" >/dev/null
+reject protocol_validate_node "$(jq '.nodes[0]|del(.engine)' "$scratch/hy-route-state.json")"
+reject protocol_validate_node "$(jq '.nodes[0]|.engine="sing-box"' "$scratch/hy-route-state.json")"
+if [[ -n ${XRAY_BIN:-} ]]; then "$XRAY_BIN" run -test -config "$scratch/hy-route-xray.json"; fi
+for engine in legacy sing-box; do
+    jq --arg engine "$engine" '.nodes[0]|=(if $engine=="legacy" then del(.engine) else .engine=$engine end)' "$scratch/hy-xray-state.json" > "$scratch/hy-legacy-state.json"
+    protocol_validate_nodes "$scratch/hy-legacy-state.json"
+    protocol_has_extra "$scratch/hy-legacy-state.json"
+    protocol_generate "$scratch/hy-legacy-state.json" "$scratch/hy-legacy-xray.json"
+    protocol_generate_extra "$scratch/hy-legacy-state.json" "$scratch/hy-legacy-extra.json"
+    jq -e '.inbounds==[]' "$scratch/hy-legacy-xray.json" >/dev/null
+    jq -e '(.inbounds|length==1) and .inbounds[0].type=="hysteria2"' "$scratch/hy-legacy-extra.json" >/dev/null
+    if [[ -n ${XM_EXTRA_BIN:-} ]]; then "$XM_EXTRA_BIN" check -c "$scratch/hy-legacy-extra.json"; fi
+done
+printf 'PASS HY2 Xray ownership and historical sing-box engine compatibility\n'
 [[ $(protocol_engine vless-ws) == xray && $(protocol_engine anytls) == extra ]]
 # Embedded PEM migration survives deletion of original source files.
 rm "$scratch/cert.pem" "$scratch/key.pem"

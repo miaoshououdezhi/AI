@@ -33,7 +33,7 @@ xray-manager — Xray 中文交互管理
 用法：xy（或 bash xray-manager.sh） [--yes] <命令> [参数]
 无参数：打开交互菜单；help：显示本帮助。
 
-  install [v版本]                 安装，默认 v26.3.27；重复安装保留节点
+  install [v版本]                 安装，默认 v26.10.29；重复安装保留节点
   update-manager                 获取项目 main 的最新管理脚本（保留核心/节点）
   update-system                  更新当前 Debian/Alpine 软件包，需要确认或 --yes
   system-update-schedule status 查看系统包定时更新状态
@@ -45,7 +45,7 @@ xray-manager — Xray 中文交互管理
   list                           列出节点（不显示秘密）
   add vless-reality ID 名称 端口 地址 SNI TARGET [UUID 私钥 公钥 ShortID]
   add vless-xhttp ID 名称 端口 地址 SNI TARGET PATH MODE [UUID 私钥 公钥 ShortID]
-  add shadowsocks ID 名称 端口 地址 [密码]
+  add shadowsocks ID 名称 端口 地址 [密码 [加密算法]]
   edit ID FIELD VALUE             修改匹配协议字段；keys PRIVATE PUBLIC
   edit ID tls CERT KEY [SNI]       同时替换 TLS 证书和私钥（私密 PEM 内嵌）
   route add ID [MODE [DOMAINS_JSON IPS_JSON]]  从标准输入读取上游链接；MODE 默认 all
@@ -53,8 +53,7 @@ xray-manager — Xray 中文交互管理
   route show ID                  输出此节点出站路由的脱敏 JSON 摘要
   add vless-ws ID 名称 端口 地址 SNI PATH 证书路径 私钥路径 [UUID]
   add socks5 ID 名称 端口 地址 [用户名 密码]
-  add anytls|hysteria2 ID 名称 端口 地址 SNI 证书路径 私钥路径 [密码]
-  add tuicv5 ID 名称 端口 地址 SNI 证书路径 私钥路径 [UUID 密码]
+  add hysteria2 ID 名称 端口 地址 SNI 证书路径 私钥路径 [密码]（Xray）
   delete ID                      删除节点，需要确认或 --yes
   share ID                       显式输出含客户端秘密的分享链接
   service start|stop|restart|status|enable|disable
@@ -72,7 +71,7 @@ xray-manager — Xray 中文交互管理
 端口与地址由节点配置指定；首次安装不开放任何公网监听。
 CLI 返回：0 成功，1 操作失败，2 参数错误或取消；中断 130/143。
 出站路由按节点独立设置，仅支持 Xray 入站；all 全部经上游，rules 按域名/IP 分流，未命中直连。
-支持 REALITY、XHTTP、SS2022、VLESS(ws)、SOCKS5；AnyTLS/HY2/TUICv5使用辅助核心；重复安装会备份并清退已移除类型的旧节点。
+可添加 REALITY、XHTTP、SS2022、VLESS(ws)、HY2、SOCKS5，均使用 Xray；历史辅助核心节点可继续管理和迁移。
 升级/恢复会在原生校验及健康失败时回退；SIGKILL/断电需 diagnose 检查。
 HELP
 }
@@ -214,18 +213,35 @@ xm_menu_draft() {
     done
     xm_error '无法生成不冲突的随机凭据，请重试。'; return 1
 }
+# Newly created HY2 nodes use Xray; old untagged HY2 nodes keep their engine.
+xm_hy2_core_ready() {
+    local version
+    version=$("$XM_BIN" version) || { xm_error '无法读取 Xray 版本，请先升级核心。'; return 1; }
+    [[ $version =~ ^Xray[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+) ]] || { xm_error 'Xray 版本格式无效。'; return 1; }
+    version=${BASH_REMATCH[1]}
+    if ! "${XM_PYTHON:-python3}" - "$version" <<'PYVERSION'
+import re,sys
+m=re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)",sys.argv[1])
+sys.exit(0 if m and tuple(map(int,m.groups())) >= (26,10,29) else 1)
+PYVERSION
+    then
+        xm_error 'Xray HY2 需要 v26.10.29 或更新版本，请先选择“版本升级”。'
+        return 1
+    fi
+}
 xm_add() {
     (($# >= 5)) || { xm_usage_error 'add 的参数不足。'; return 2; }
+    case $1 in anytls|tuicv5) xm_usage_error '已移除 AnyTLS / TUIC v5 添加功能。'; return 2 ;; esac
     xm_ready && xm_work_begin || return 1
     local node type=$1 id=$2 name=$3 port=$4
+    [[ $type != hysteria2 ]] || xm_hy2_core_ready || return 1
     case $type in
         vless-reality) (($# == 7 || $# == 11)) || { xm_usage_error 'VLESS 需要 SNI TARGET，可选的 UUID/私钥/公钥/ShortID 须同时提供。'; return 2; } ;;
         vless-xhttp) (($# == 9 || $# == 13)) || { xm_usage_error 'XHTTP 需要 SNI TARGET PATH MODE，可选四项密钥须同时提供。'; return 2; } ;;
         vless-ws) (($# == 9 || $# == 10)) || { xm_usage_error 'WS需要SNI PATH CERT KEY，可选UUID。'; return 2; } ;;
         socks5) (($# == 5 || $# == 7)) || { xm_usage_error 'SOCKS5可选用户名和密码须成对。'; return 2; } ;;
-        anytls|hysteria2) (($# == 8 || $# == 9)) || { xm_usage_error 'TLS协议需要SNI CERT KEY，可选密码。'; return 2; } ;;
-        tuicv5) (($# == 8 || $# == 10)) || { xm_usage_error 'TUIC需要SNI CERT KEY，可选UUID和密码须成对。'; return 2; } ;;
-        shadowsocks) (($# == 5 || $# == 6)) || { xm_usage_error 'Shadowsocks 密码可选。'; return 2; } ;;
+        hysteria2) (($# == 8 || $# == 9)) || { xm_usage_error 'TLS协议需要SNI CERT KEY，可选密码。'; return 2; } ;;
+        shadowsocks) (($# >= 5 && $# <= 7)) || { xm_usage_error 'SS2022 接受可选密码和加密算法（AES-128/AES-256完整名称）。'; return 2; } ;;
         *) xm_usage_error '不支持此协议。'; return 2 ;;
     esac
     node=$(protocol_new "$@") || return 1
@@ -297,9 +313,11 @@ xm_edit_secret() {
     local variable=$1 prompt=$2 default=$3 reply
     [[ $variable =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 1
     while :; do
-        printf '%s%s [回车保持现有值；隐藏]：%s' "$XM_UI_CYAN" "$prompt" "$XM_UI_RESET" >&2
-        IFS= read -r -s reply || { printf '\n' >&2; return 2; }
-        printf '\n' >&2
+        xm_ui_prompt "$prompt" '回车保持现有值；输入隐藏；:q 取消'
+        local status=0
+        IFS= read -r -s reply || status=$?
+        xm_ui_input_end
+        [[ $status == 0 ]] || return 2
         [[ $reply != :q ]] || return 2
         xm_input_safe "$reply" || { xm_error '输入不能含控制字符。'; continue; }
         [[ -n $reply ]] || reply=$default
@@ -310,10 +328,10 @@ xm_edit_secret() {
 # URI credentials remain in shell memory/stdin, never in a child argv. Read at
 # most one bounded line, hide TTY input, and accept a final line without LF.
 xm_route_read_uri() {
-    local reply='' result
-    [[ ! -t 0 ]] || printf '%s上游节点链接 [隐藏；:q 取消]：%s' "$XM_UI_CYAN" "$XM_UI_RESET" >&2
-    IFS= read -r -s -n 8193 reply; result=$?
-    [[ ! -t 0 ]] || printf '\n' >&2
+    local reply='' result=0
+    [[ ! -t 0 ]] || xm_ui_prompt '落地节点链接（ss:// / vless:// 等）' '输入隐藏；:q 取消'
+    IFS= read -r -s -n 8193 reply || result=$?
+    [[ ! -t 0 ]] || xm_ui_input_end
     [[ $reply != :q ]] || { xm_info '已取消。'; return 2; }
     [[ $result == 0 || -n $reply ]] || { xm_error '未读取到上游节点链接，已取消。'; return 2; }
     [[ -n $reply && ${#reply} -le 8192 ]] && xm_input_safe "$reply" || { xm_error '上游链接须为单行，最多 8192 字符，不能含控制字符。'; return 2; }
@@ -331,16 +349,22 @@ xm_route_summary() {
 xm_route_display() {
     local summary mode endpoint
     summary=$(xm_route_summary "$1") || return 1
-    if [[ $(jq -r .enabled <<< "$summary") == false ]]; then xm_info '出站路由：直连（未添加上游）。'; return 0; fi
-    if [[ $(jq -r .mode <<< "$summary") == all ]]; then mode='全部经上游'
+    if [[ $(jq -r .enabled <<< "$summary") == false ]]; then
+        printf '%s' '[["出站","直连（未设置落地节点）"]]' | xm_ui_fields
+        return $?
+    fi
+    if [[ $(jq -r .mode <<< "$summary") == all ]]; then mode='全部流量经落地节点'
     else mode="指定域名/IP 经上游；未匹配直连（域名 $(jq -r .domain_count <<< "$summary") / IP $(jq -r .ip_count <<< "$summary")）"; fi
     endpoint=$(jq -r 'if (.address|contains(":")) then "["+.address+"]:"+(.port|tostring) else .address+":"+(.port|tostring) end' <<< "$summary") || return 1
-    printf '%s出站路由%s  %s\n%s上游节点%s  %s · %s\n' "$XM_UI_CYAN" "$XM_UI_RESET" "$mode" "$XM_UI_CYAN" "$XM_UI_RESET" "$(jq -r .protocol <<< "$summary")" "$endpoint" >&2
+    jq -n --arg mode "$mode" --arg endpoint "$endpoint" --arg protocol "$(jq -r .protocol <<< "$summary")" '[["出站",$mode],["落地",$protocol+" · "+$endpoint]]' | xm_ui_fields
+    xm_info '链路：客户端 → 当前节点 → 落地节点 → 目标网站。'
 }
 xm_route_commit() {
     local original=$1 candidate=$2 prompt=$3 id actual
     id=$(jq -r .id <<< "$original") || return 1
     [[ $candidate != "$original" ]] || { xm_info '出站路由未变化，无须保存。'; return 0; }
+    xm_ui_heading '确认出站路由'
+    xm_node_summary "$original"
     protocol_validate_node "$candidate" && xm_route_display "$candidate" || return 1
     xm_confirm "$prompt" || return 2
     xm_ready || return 1
@@ -371,7 +395,7 @@ xm_route() {
             candidate=$(jq -c 'del(.outbound_route)' <<< "$original") || return 1
             prompt="删除节点 $id 的出站路由并恢复直连？" ;;
         add)
-            case $(jq -r .type <<< "$original") in anytls|hysteria2|tuicv5) xm_error '辅助核心节点暂不支持 Xray 出站路由，请选择 REALITY/XHTTP/SS2022/WS/SOCKS5 节点。'; return 2 ;; esac
+            [[ $(protocol_engine "$(jq -r .type <<< "$original")" "$(jq -r '.engine // empty' <<< "$original")") == xray ]] || { xm_error '此历史辅助核心节点不支持 Xray 出站路由。'; return 2; }
             xm_route_read_uri || return $?
             route=$(protocol_outbound_route "$XM_ROUTE_URI" "$mode" "$domains" "$ips") || return 1
             unset XM_ROUTE_URI
@@ -384,8 +408,11 @@ xm_route() {
 xm_menu_route_add() {
     local node=$1 id XM_CHOICE XM_DOMAINS='[]' XM_IPS='[]' mode
     id=$(jq -r .id <<< "$node") || return 1
-    xm_ui_heading '添加出站路由'
-    xm_ui_item 1 '全部经上游'; xm_ui_item 2 '指定域名/IP 分流'; xm_ui_item 0 '返回'
+    xm_ui_heading '设置落地节点'
+    xm_node_summary "$node"
+    xm_info '客户端 → 当前节点 → 落地节点 → 目标网站。'
+    xm_info '粘贴另一台服务器的 ss:// 或 vless:// 单节点链接。'
+    xm_ui_item 1 '全部流量经落地节点'; xm_ui_item 2 '指定域名/IP 分流'; xm_ui_item 0 '返回'
     while :; do
         xm_read XM_CHOICE '路由模式编号' '1' || return 2
         case $XM_CHOICE in 0) return 0 ;; 1) mode=all; break ;; 2) mode=rules; break ;; *) xm_error '请输入 1、2 或 0。' ;; esac
@@ -395,7 +422,7 @@ xm_menu_route_add() {
         xm_read XM_DOMAINS '域名规则数组，例如 ["domain:example.com"]' '[]' || return 2
         xm_read XM_IPS 'IP/CIDR 规则数组，例如 ["203.0.113.0/24"]' '[]' || return 2
     fi
-    xm_info '请粘贴上游节点链接；链接和密码保持隐藏。已有路由将明确确认后替换。'
+    xm_info '接下来粘贴落地节点链接；输入隐藏，保存前显示脱敏摘要并确认。'
     xm_dispatch route add "$id" "$mode" "$XM_DOMAINS" "$XM_IPS"
 }
 xm_menu_edit() {
@@ -408,7 +435,10 @@ xm_menu_edit() {
                 fields+=(sni target uuid short_id keys)
                 captions+=('REALITY SNI' 'REALITY 目标（域名:端口）' 'UUID' 'ShortID（偶数位十六进制）' 'REALITY 公私钥（成对替换）')
                 [[ $type != vless-xhttp ]] || { fields+=(path mode); captions+=('XHTTP 路径（/开头，字母数字/_-）' 'XHTTP 模式（auto/packet-up/stream-up/stream-one）'); } ;;
-            shadowsocks) fields+=(password); captions+=('SS2022 主密钥（16字节标准Base64）') ;;
+            shadowsocks)
+                fields+=(password)
+                if [[ $(jq -r .method <<< "$original") == 2022-blake3-aes-256-gcm ]]; then captions+=('SS2022 AES-256 主密钥（32字节Base64）')
+                else captions+=('SS2022 AES-128 主密钥（16字节Base64）'); fi ;;
             socks5) fields+=(username password); captions+=('认证用户名（3..64字母数字_-）' '认证密码（16..128字符）') ;;
             vless-ws|anytls|hysteria2|tuicv5)
                 fields+=(sni tls); captions+=('TLS SNI（须匹配证书SAN）' 'TLS证书/私钥（成对替换，可同时修改SNI）')
@@ -468,13 +498,8 @@ xm_menu_edit() {
     elif [[ $field == keys ]]; then xm_dispatch edit "$id" keys "$XM_PRIVATE" "$XM_PUBLIC"; else xm_dispatch edit "$id" "$field" "$XM_VALUE"; fi
 }
 xm_menu_node_details() {
-    local node=$1 XM_CHOICE field label value
-    for field in sni target path mode method; do
-        value=$(jq -r --arg field "$field" '.[$field] // empty' <<< "$node")
-        [[ -n $value ]] || continue
-        case $field in sni) label='SNI' ;; target) label='REALITY 目标' ;; path) label='XHTTP 路径' ;; mode) label='XHTTP 模式' ;; method) label='加密算法' ;; esac
-        printf '%s%s%s  %s%s%s\n' "$XM_UI_CYAN" "$label" "$XM_UI_RESET" "$XM_UI_GREEN" "$value" "$XM_UI_RESET" >&2
-    done
+    local node=$1 XM_CHOICE
+    jq '[["核心",(if .type=="hysteria2" then (if .engine=="xray" then "Xray" else "sing-box（历史节点）" end) elif .type=="anytls" or .type=="tuicv5" then "sing-box（历史节点）" else "Xray" end)]] + [to_entries[] | select(.key=="sni" or .key=="target" or .key=="path" or .key=="mode" or .key=="method") | [(if .key=="sni" then "SNI" elif .key=="target" then "目标" elif .key=="path" then "路径" elif .key=="mode" then "模式" else "加密" end),.value]]' <<< "$node" | xm_ui_fields || return 1
     xm_info '凭据保持隐藏；查看客户端链接请选择“分享链接”。'
     xm_route_display "$node" || return 1
     printf '\n' >&2
@@ -483,8 +508,8 @@ xm_menu_node_details() {
     if jq -e 'has("sni")' <<< "$node" >/dev/null; then has_sni=1; xm_ui_item 4 '修改 SNI'; fi
     xm_ui_item 5 '更多配置'
     local has_route_support=1
-    case $(jq -r .type <<< "$node") in anytls|hysteria2|tuicv5) has_route_support=0 ;; esac
-    if [[ $has_route_support == 1 ]]; then xm_ui_item 6 '添加出站路由'; xm_ui_item 7 '删除出站路由'; fi
+    [[ $(protocol_engine "$(jq -r .type <<< "$node")" "$(jq -r '.engine // empty' <<< "$node")") == xray ]] || has_route_support=0
+    if [[ $has_route_support == 1 ]]; then xm_ui_item 6 '设置出站 / 落地节点'; xm_ui_item 7 '删除出站 / 恢复直连'; fi
     xm_ui_item 0 '返回'
     while :; do
         xm_read XM_CHOICE '节点操作编号' '0' || return 2
@@ -895,9 +920,7 @@ xm_node_type_label() {
 }
 xm_node_summary() {
     local node=$1
-    printf '%s名称%s %s  ·  %s类型%s %s\n' "$XM_UI_CYAN" "$XM_UI_RESET" "$(jq -r .name <<< "$node")" "$XM_UI_CYAN" "$XM_UI_RESET" "$(xm_node_type_label "$(jq -r .type <<< "$node")")" >&2
-    printf '%s地址%s %s  ·  %s端口%s %s%s%s\n' "$XM_UI_CYAN" "$XM_UI_RESET" "$(jq -r .address <<< "$node")" "$XM_UI_CYAN" "$XM_UI_RESET" "$XM_UI_GREEN" "$(jq -r .port <<< "$node")" "$XM_UI_RESET" >&2
-    printf 'ID %s\n' "$(jq -r .id <<< "$node")" >&2
+    jq --arg kind "$(xm_node_type_label "$(jq -r .type <<< "$node")")" '[["名称",.name],["协议",$kind],["地址",.address],["端口",(.port|tostring)],["ID",.id]]' <<< "$node" | xm_ui_fields
 }
 xm_menu_node() {
     local action=$1 snapshot node XM_CHOICE selected_id XM_SELECTED_NODE title
@@ -911,8 +934,8 @@ xm_menu_node() {
     local display number kind name address identity
     display=$(printf '%s' "$snapshot" | jq '[.[]|{id,type,name,address,port}]' | xm_ui_format nodes "$(xm_terminal_width)" 2>/dev/null) || { xm_error '节点列表显示失败。'; return 1; }
     while IFS=$'\t' read -r number kind name address identity; do
-        printf '%s[%s]%s %s%s%s  %s%s%s\n' "$XM_UI_BLUE" "$number" "$XM_UI_RESET" "$XM_UI_CYAN" "$kind" "$XM_UI_RESET" "$XM_UI_GREEN" "$name" "$XM_UI_RESET" >&2
-        printf '    %s\n  ID %s\n\n' "$address" "$identity" >&2
+        printf '%s[%s]%s %s%s%s\n' "$XM_UI_BLUE" "$number" "$XM_UI_RESET" "$XM_UI_CYAN" "$kind" "$XM_UI_RESET" >&2
+        printf '    %s名称%s  %s%s%s\n    %s地址%s  %s\n    %sID  %s  %s\n\n' "$XM_UI_CYAN" "$XM_UI_RESET" "$XM_UI_WHITE" "$name" "$XM_UI_RESET" "$XM_UI_CYAN" "$XM_UI_RESET" "$address" "$XM_UI_CYAN" "$XM_UI_RESET" "$identity" >&2
     done <<< "$display"
     xm_ui_item 0 '返回'
     xm_info "输入 1..${#nodes[@]} 选择对应节点；0 返回，:q 取消。"
@@ -928,10 +951,18 @@ xm_menu_node() {
     xm_ready || { xm_unlock; return 1; }
     xm_selected_unchanged "$selected_id" || { xm_unlock; return 1; }
     xm_unlock
-    printf '\n' >&2; xm_node_summary "$XM_SELECTED_NODE"
+    xm_ui_heading "已选择节点 [$XM_CHOICE]"
+    xm_node_summary "$XM_SELECTED_NODE"
     case $action in
         view) xm_menu_node_details "$XM_SELECTED_NODE" ;;
-        share) xm_info '以下链接包含客户端秘密，请妥善保管，勿公开。'; xm_dispatch share "$selected_id" ;;
+        share)
+            xm_ui_heading '分享结果'
+            xm_info '以下链接包含客户端秘密，请复制完整一行，勿公开。'
+            printf '\n' >&2
+            xm_dispatch share "$selected_id"
+            local share_status=$?
+            printf '\n' >&2
+            return "$share_status" ;;
         delete) xm_dispatch delete "$selected_id" ;;
     esac
 }
@@ -1095,7 +1126,7 @@ xm_menu_password() {
     done
 }
 xm_menu_add() {
-    local XM_CHOICE XM_ID XM_NAME XM_PORT XM_ADDRESS XM_SNI XM_TARGET XM_PATH XM_MODE XM_PASSWORD XM_CERT XM_KEY XM_USERNAME
+    local XM_CHOICE XM_ID XM_NAME XM_PORT XM_ADDRESS XM_SNI XM_TARGET XM_PATH XM_MODE XM_PASSWORD XM_CERT XM_KEY XM_USERNAME XM_METHOD
     local XM_MENU_NODE XM_INPUT suffix prefix default_id default_name default_port default_password type attempts
     xm_menu_ready || return 1
     xm_ui_heading '添加节点'
@@ -1103,14 +1134,15 @@ xm_menu_add() {
     xm_ui_item 2 'VLESS XHTTP + REALITY'
     xm_ui_item 3 'Shadowsocks 2022'
     xm_ui_item 4 'VLESS WebSocket + TLS'
-    xm_ui_item 5 'AnyTLS（辅助核心）'; xm_ui_item 6 'Hysteria2 / HY2（辅助核心）'
-    xm_ui_item 7 'TUIC v5（辅助核心）'; xm_ui_item 8 'SOCKS5（账号密码认证）'
+    xm_ui_item 5 'Hysteria2 / HY2（Xray）'
+    xm_ui_item 6 'SOCKS5（账号密码认证）'
     printf '\n' >&2; xm_ui_item 0 '返回'
     xm_info '回车使用方括号中的默认值；任意字段输入 :q 取消。'
     while :; do
         xm_read XM_CHOICE '选择协议' '1' || return 2
-        case $XM_CHOICE in 0) return 0 ;; 1) type=vless-reality; prefix=REALITY; break ;; 2) type=vless-xhttp; prefix=XHTTP; break ;; 3) type=shadowsocks; prefix=SS2022; break ;; 4) type=vless-ws; prefix=WS; break ;; 5) type=anytls; prefix=AnyTLS; break ;; 6) type=hysteria2; prefix=HY2; break ;; 7) type=tuicv5; prefix=TUIC; break ;; 8) type=socks5; prefix=SOCKS5; break ;; *) xm_error '请输入 0..8。' ;; esac
+        case $XM_CHOICE in 0) return 0 ;; 1) type=vless-reality; prefix=REALITY; break ;; 2) type=vless-xhttp; prefix=XHTTP; break ;; 3) type=shadowsocks; prefix=SS2022; break ;; 4) type=vless-ws; prefix=WS; break ;; 5) type=hysteria2; prefix=HY2; break ;; 6) type=socks5; prefix=SOCKS5; break ;; *) xm_error '请输入 0..6。' ;; esac
     done
+    [[ $type != hysteria2 ]] || xm_hy2_core_ready || return 1
     default_id=
     for ((attempts=0; attempts<16; attempts++)); do
         suffix=$(openssl rand -hex 4) || return 1
@@ -1162,7 +1194,7 @@ xm_menu_add() {
             xm_menu_password XM_PASSWORD "$(jq -r .password <<< "$XM_MENU_NODE")" || return 2
             xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_USERNAME" "$XM_PASSWORD"
             ;;
-        vless-ws|anytls|hysteria2|tuicv5)
+        vless-ws|hysteria2)
             xm_warning '需要有效证书及匹配私钥，SAN须包含TLS SNI；不自动跳过客户端证书验证。'
             while :; do
                 xm_read XM_SNI 'TLS SNI（证书SAN中的域名/IP）' "$XM_ADDRESS" || return 2
@@ -1180,18 +1212,28 @@ xm_menu_add() {
                 vless-ws)
                     xm_menu_field XM_PATH path 'WS路径（/开头，字母数字/_-）' "$XM_PATH" || return 2
                     xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_SNI" "$XM_PATH" "$XM_CERT" "$XM_KEY" "$(jq -r .uuid <<< "$XM_MENU_NODE")" ;;
-                anytls|hysteria2)
+                hysteria2)
                     xm_menu_password XM_PASSWORD "$(jq -r .password <<< "$XM_MENU_NODE")" || return 2
                     xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_SNI" "$XM_CERT" "$XM_KEY" "$XM_PASSWORD" ;;
-                tuicv5)
-                    xm_menu_password XM_PASSWORD "$(jq -r .password <<< "$XM_MENU_NODE")" || return 2
-                    xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_SNI" "$XM_CERT" "$XM_KEY" "$(jq -r .uuid <<< "$XM_MENU_NODE")" "$XM_PASSWORD" ;;
             esac
             ;;
         shadowsocks)
+            xm_ui_heading 'SS2022 加密方式'
+            xm_ui_item 1 'AES-128-GCM（2022）'
+            xm_ui_item 2 'AES-256-GCM（2022）'
+            while :; do
+                xm_read XM_CHOICE '加密方式编号' 1 || return 2
+                case $XM_CHOICE in
+                    1) XM_METHOD=2022-blake3-aes-128-gcm; break ;;
+                    2) XM_METHOD=2022-blake3-aes-256-gcm; break ;;
+                    *) xm_error '请选择 1 或 2，:q 取消。' ;;
+                esac
+            done
+            xm_menu_draft "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" '' "$XM_METHOD" || return 1
+            xm_info "已选择 $XM_METHOD；回车使用对应长度的随机主密钥。"
             default_password=$(jq -r .password <<< "$XM_MENU_NODE") || return 1
             xm_menu_password XM_PASSWORD "$default_password" || return 2
-            xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_PASSWORD"
+            xm_dispatch add "$type" "$XM_ID" "$XM_NAME" "$XM_PORT" "$XM_ADDRESS" "$XM_PASSWORD" "$XM_METHOD"
             ;;
     esac
 }
@@ -1231,7 +1273,7 @@ xm_menu_upgrade() {
             0) return 0 ;;
             m|M)
                 while :; do
-                    xm_read XM_VERSION '目标版本（例 v26.3.27）' '' ':q 返回' || return 2
+                    xm_read XM_VERSION '目标版本（例 v26.10.29）' '' ':q 返回' || return 2
                     xm_version_valid "$XM_VERSION" && break
                 done
                 selected_label='手动指定版本'; break ;;

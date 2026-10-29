@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 source "$repo/lib/protocol.sh"
-: "${XRAY_BIN:?set XRAY_BIN}" "${XM_EXTRA_BIN:?set XM_EXTRA_BIN}"
+: "${XRAY_BIN:?set XRAY_BIN}"
+[[ ${1:-} == --xray-only ]] || : "${XM_EXTRA_BIN:?set XM_EXTRA_BIN}"
 py=${XM_PYTHON:-python3}
 scratch=$(mktemp -d)
 pids=()
@@ -15,8 +16,9 @@ trap cleanup EXIT
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$scratch/key.pem" -out "$scratch/cert.pem" -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' -days 2 >/dev/null 2>&1
 chmod 600 "$scratch/key.pem"
 "$XRAY_BIN" version | head -2
-"$XM_EXTRA_BIN" version | head -2
+[[ ${1:-} == --xray-only ]] || "$XM_EXTRA_BIN" version | head -2
 for type in vless-ws socks5 anytls hysteria2 tuicv5; do
+    if [[ ${1:-} == --xray-only && ( $type == anytls || $type == tuicv5 ) ]]; then continue; fi
     if [[ $type == vless-ws ]]; then protocol_new "$type" fixture "$type" 25443 localhost localhost /xm-ws "$scratch/cert.pem" "$scratch/key.pem" > "$scratch/node.json"
     elif [[ $type == socks5 ]]; then protocol_new "$type" fixture "$type" 25443 localhost > "$scratch/node.json"
     else protocol_new "$type" fixture "$type" 25443 localhost localhost "$scratch/cert.pem" "$scratch/key.pem" > "$scratch/node.json"; fi
@@ -28,7 +30,7 @@ import json,pathlib,socket,sys
 p=pathlib.Path(sys.argv[1]);sockets=[];ports=[]
 for _ in range(3):
  s=socket.socket();s.bind(('127.0.0.1',0));sockets.append(s);ports.append(s.getsockname()[1])
-n=json.loads((p/'node.json').read_text());t=n['type'];extra=t in ('anytls','hysteria2','tuicv5');f=p/('extra.json' if extra else 'xray.json');cfg=json.loads(f.read_text())
+n=json.loads((p/'node.json').read_text());t=n['type'];extra=t in ('anytls','tuicv5') or (t=='hysteria2' and n.get('engine','sing-box')=='sing-box');f=p/('extra.json' if extra else 'xray.json');cfg=json.loads(f.read_text())
 if extra:
  cfg['inbounds'][0].update(listen='127.0.0.1',listen_port=ports[0]);cfg['route']['rules']=[{'ip_cidr':['127.0.0.1/32'],'port':[ports[2]],'action':'route','outbound':'direct'},{'action':'reject'}]
  out={'type':'tuic' if t=='tuicv5' else t,'tag':'proxy','server':'127.0.0.1','server_port':ports[0],'password':n['password'],'tls':{'enabled':True,'server_name':'localhost','certificate':n['tls_cert'].splitlines()}}
@@ -37,7 +39,8 @@ if extra:
 else:
  cfg['inbounds'][0].update(listen='127.0.0.1',port=ports[0]);cfg['routing']['rules']=[{'type':'field','ip':['127.0.0.1/32'],'port':str(ports[2]),'outboundTag':'direct'},{'type':'field','network':'tcp,udp','outboundTag':'block'}]
  cfg['outbounds'][0]['settings']={'finalRules':[{'action':'allow','ip':['127.0.0.1/32'],'port':str(ports[2])}]}
- if t=='vless-ws':out={'protocol':'vless','settings':{'vnext':[{'address':'127.0.0.1','port':ports[0],'users':[{'id':n['uuid'],'encryption':'none'}]}]},'streamSettings':{'network':'ws','security':'tls','wsSettings':{'path':n['path']},'tlsSettings':{'serverName':'localhost','certificates':[{'certificate':n['tls_cert'].splitlines(),'usage':'verify'}]}}}
+ if t=='hysteria2':out={'protocol':'hysteria','settings':{'version':2,'address':'127.0.0.1','port':ports[0]},'streamSettings':{'network':'hysteria','security':'tls','hysteriaSettings':{'version':2,'auth':n['password']},'tlsSettings':{'serverName':'localhost','alpn':['h3'],'certificates':[{'certificate':n['tls_cert'].splitlines(),'usage':'verify'}]}}}
+ elif t=='vless-ws':out={'protocol':'vless','settings':{'vnext':[{'address':'127.0.0.1','port':ports[0],'users':[{'id':n['uuid'],'encryption':'none'}]}]},'streamSettings':{'network':'ws','security':'tls','wsSettings':{'path':n['path']},'tlsSettings':{'serverName':'localhost','certificates':[{'certificate':n['tls_cert'].splitlines(),'usage':'verify'}]}}}
  else:out={'protocol':'socks','settings':{'servers':[{'address':'127.0.0.1','port':ports[0],'users':[{'user':n['username'],'pass':n['password']}]}]}}
  client={'log':{'loglevel':'warning'},'inbounds':[{'listen':'127.0.0.1','port':ports[1],'protocol':'socks','settings':{'auth':'noauth'}}],'outbounds':[out]}
 f.write_text(json.dumps(cfg));(p/'client.json').write_text(json.dumps(client));(p/'ports').write_text('\n'.join(map(str,ports))+'\n');(p/'payload').write_text('xray-manager-five-protocol-e2e\n')
@@ -45,7 +48,7 @@ for s in sockets:s.close()
 PY
     mapfile -t ports < "$scratch/ports"
     "$py" -m http.server "${ports[2]}" --bind 127.0.0.1 --directory "$scratch" > "$scratch/http.log" 2>&1 & pids+=("$!")
-    if [[ $(protocol_engine "$type") == extra ]]; then
+    if [[ $(protocol_engine "$type" "$(jq -r '.engine // "sing-box"' "$scratch/node.json")") == extra ]]; then
         "$XM_EXTRA_BIN" check -c "$scratch/extra.json"
         "$XM_EXTRA_BIN" check -c "$scratch/client.json"
         "$XM_EXTRA_BIN" run -c "$scratch/extra.json" > "$scratch/server.log" 2>&1 & pids+=("$!")
@@ -61,6 +64,28 @@ PY
         cat "$scratch/server.log" "$scratch/client.log" >&2; exit 1
     fi
     cmp "$scratch/payload" "$scratch/response"
+    if [[ $type == hysteria2 && -n ${XM_EXTRA_BIN:-} ]]; then
+        # Cross-engine interoperability: the same generated Xray HY2 inbound is
+        # used by a sing-box client, with certificate verification enabled.
+        kill "${pids[-1]}" 2>/dev/null || true
+        wait "${pids[-1]}" 2>/dev/null || true
+        unset 'pids[-1]'
+        "$py" - "$scratch" <<'PYCLIENT'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);n=json.loads((p/'node.json').read_text());ports=list(map(int,(p/'ports').read_text().splitlines()))
+out={'type':'hysteria2','tag':'proxy','server':'127.0.0.1','server_port':ports[0],'password':n['password'],'tls':{'enabled':True,'server_name':'localhost','certificate':n['tls_cert'].splitlines(),'alpn':['h3']}}
+client={'log':{'level':'warn'},'inbounds':[{'type':'socks','listen':'127.0.0.1','listen_port':ports[1]}],'outbounds':[out]}
+(p/'sing-client.json').write_text(json.dumps(client))
+PYCLIENT
+        "$XM_EXTRA_BIN" check -c "$scratch/sing-client.json"
+        "$XM_EXTRA_BIN" run -c "$scratch/sing-client.json" > "$scratch/sing-client.log" 2>&1 & pids+=("$!")
+        sleep 1
+        if ! curl --disable --fail --silent --show-error --noproxy '' --connect-timeout 10 --max-time 20 --socks5-hostname "127.0.0.1:${ports[1]}" "http://127.0.0.1:${ports[2]}/payload" -o "$scratch/response"; then
+            cat "$scratch/server.log" "$scratch/sing-client.log" >&2; exit 1
+        fi
+        cmp "$scratch/payload" "$scratch/response"
+        printf 'PASS e2e hysteria2: sing-box client -> Xray server, verified TLS, exact loopback HTTP fixture\n'
+    fi
     for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
     pids=()
     if [[ $type == socks5 ]]; then
