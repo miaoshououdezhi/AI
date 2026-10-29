@@ -23,8 +23,35 @@ printf 'native extra failure\n' > "$XM_LOG/last-extra-error.log"
 printf 'scheduled update output\n' > "$XM_LOG/system-update-schedule.log"
 printf 'rotated output\n' > "$XM_LOG/system-update-schedule.log.1.gz"
 printf 'external export\n' > "$tmp/export.json"
+# Existing archives from distro-wide dateext must not block uninstall.
+for name in console extra-console restart-schedule system-update-schedule; do
+    for suffix in -20261027 -20261026.gz .1 .4.gz; do
+        printf 'owned archive\n' > "$XM_LOG/$name.log$suffix"
+    done
+done
 platform_shortcut_install
 platform_clean_uninstall_preflight
+printf 'PASS: dated and numbered archives accepted for all four owned log sources\n'
+# Similar names, directories, FIFOs and symlinks remain protected.
+for name in foreign.log-20261027 console.log-2026102 console.log-202610270 console.log-20261027.bak console.log.5; do
+    printf 'foreign archive\n' > "$XM_LOG/$name"
+    reject platform_clean_uninstall_preflight
+    [[ -f $XM_LOG/$name && -f $XM_BIN ]] || fail 'archive rejection changed installation'
+    rm "$XM_LOG/$name"
+done
+mkdir "$XM_LOG/console.log-20261025"
+reject platform_clean_uninstall_preflight
+rmdir "$XM_LOG/console.log-20261025"
+mkfifo "$XM_LOG/console.log-20261025"
+reject platform_clean_uninstall_preflight
+rm "$XM_LOG/console.log-20261025"
+for name in console extra-console restart-schedule system-update-schedule; do
+    ln -s "$tmp/export.json" "$XM_LOG/$name.log-20261025.gz"
+    reject platform_clean_uninstall_preflight
+    [[ $(cat "$tmp/export.json") == 'external export' ]] || fail 'dated symlink changed export'
+    rm "$XM_LOG/$name.log-20261025.gz"
+done
+printf 'PASS: unknown archives and dated directory/FIFO/symlink protections\n'
 # Failed first-install cleanup has no core/state, but still needs all original
 # ownership and unknown-leaf protections. This never touches host services.
 mv "$XM_BIN" "$tmp/core-before"
@@ -47,6 +74,7 @@ printf 'foreign preserved\n' > "$XM_ETC/foreign.conf"
 reject platform_clean_uninstall_preflight
 [[ $(cat "$XM_ETC/foreign.conf") == 'foreign preserved' && -f $XM_BIN ]] || fail 'foreign preflight mutation'
 rm "$XM_ETC/foreign.conf"
+rm "$XM_LOG/console.log.1"
 ln -s "$tmp/export.json" "$XM_LOG/console.log.1"
 reject platform_clean_uninstall_preflight
 [[ $(cat "$tmp/export.json") == 'external export' ]] || fail 'external export changed'

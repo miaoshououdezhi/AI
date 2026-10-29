@@ -495,7 +495,7 @@ blocks=re.findall(r'([^{}]+)\{([^{}]+)\}',text)
 for name,mode in [('console','0640 root xray-manager'),('extra-console','0640 root xray-manager'),('restart-schedule','0600 root root'),('system-update-schedule','0600 root root')]:
  matches=[body for paths,body in blocks if '/var/log/xray-manager/'+name+'.log' in paths.split()]
  assert len(matches)==1, name
- assert 'create '+mode in matches[0] and 'rotate 4' in matches[0] and 'maxsize 10M' in matches[0],name
+ assert 'create '+mode in matches[0] and 'rotate 4' in matches[0] and 'maxsize 10M' in matches[0] and 'nodateext' in matches[0].split(),name
 print('PASS: all OpenRC log sources have bounded rotation and matching ownership/mode')
 PY
 printf 'PASS: log source selection, fixed journal units, default compatibility and symlink rejection\n'

@@ -1,128 +1,105 @@
-# 协议与节点契约
+# 协议与节点
 
-初版以 Xray-core **v26.3.27** 为兼容基线。安装其他显式版本时，管理器会用该版本的 `xray run -test -config` 检查；通过配置检查不代表真实客户端已互通。Xray 的该版本仍接受 Shadowsocks，但会输出未来可能删除的弃用提示，升级前应备份并执行互通检查。
+## 支持协议
 
-## 三种节点
-
-| 类型 | 服务端参数 | 客户端映射 |
+| CLI 类型 | 协议与传输 | 凭据及主要参数 |
 | --- | --- | --- |
-| `vless-reality` | UUID、X25519 公私钥、SNI、target、shortId | VLESS + REALITY + `xtls-rprx-vision`，TCP/RAW，Chrome 指纹；公钥填入 `pbk` |
-| `vless-xhttp` | UUID、X25519 公私钥、SNI、target、shortId、path、mode | VLESS + XHTTP + REALITY；无 Vision flow，Chrome 指纹 |
-| `shadowsocks` | 随机 16 字节 Base64 密钥 | `2022-blake3-aes-128-gcm`；TCP 与 UDP |
+| `vless-reality` | VLESS + REALITY + Vision，TCP / RAW | UUID、X25519 密钥对、SNI、target、ShortID |
+| `vless-xhttp` | VLESS + XHTTP + REALITY | REALITY 参数、path、mode；不使用 Vision flow |
+| `shadowsocks` | Shadowsocks 2022，TCP / UDP | `2022-blake3-aes-128-gcm`，16 字节标准 Base64 密钥 |
+| `vless-ws` | VLESS + WebSocket + TLS | UUID、SNI、WS 路径、证书与私钥 |
+| `socks5` | 认证 SOCKS5，TCP / UDP | 用户名和密码；协议本身无传输加密 |
+| `anytls` | AnyTLS + TLS，TCP | 密码、SNI、证书与私钥 |
+| `hysteria2` | Hysteria2 / HY2，QUIC / UDP | 密码、SNI、证书与私钥 |
+| `tuicv5` | TUIC v5，QUIC / UDP | UUID、密码、SNI、证书与私钥 |
 
-`address` 是分享地址，接受裸 IPv4、裸 IPv6 或 ASCII 域名，IPv6 不带方括号或 scope ID。分享函数会自行增加方括号。普通中文显示名称会按 UTF-8 percent-encoding 写入 URI；显示名称不能包含换行和终端控制字符。
+前五种协议使用 Xray，后三种使用 sing-box 辅助核心。默认核心版本分别为 Xray v26.3.27 和 sing-box 1.14.2。
 
-所有节点默认绑定双栈 `::`。通过创建临时 IPv6 socket、绑定端口 0 后立即关闭，探测协议栈支持，不启动监听。Linux 内核没有 IPv6，或 `/proc/sys/net/ipv6/conf/all/disable_ipv6=1` 时，自动使用 IPv4 `0.0.0.0`；不更改系统网络设置。IPv4 模式拒绝 IPv6 节点地址。IPv6 分享地址需要服务器自身具有可用 IPv6 与相应路由。若测试沙箱禁止所有 socket 操作，探测结果无法确定，保留双栈配置，由原生 Xray 配置与实际服务启动检查作最终判断。
+## 通用字段
 
-REALITY 的 `sni` 需与目标站点的证书相符，`target` 为 `host:port`，IPv6 target 写成 `[IPv6]:port`。应选择可从服务器访问、支持 TLS 1.3 的合适站点。shortId 限定为 2–16 位偶数长度十六进制。管理器检查 UUID、密钥编码及公私钥对应关系；不会把服务端私钥写入分享 URI。
+- ID：字母开头，后续可用字母、数字、`_`、`-`，长度 1–32。
+- 名称：长度 1–128，不含控制字符。
+- 端口：1–65535，各节点不能重复；菜单默认随机选取未占用的高位端口。
+- 地址：裸 IPv4、裸 IPv6 或 ASCII 域名，不包含协议前缀、端口或路径。IPv6 分享链接由脚本自动加方括号。
 
-## 状态 JSON
+节点默认监听双栈 `::`，检测到系统禁用 IPv6 时使用 `0.0.0.0`。使用 IPv6 分享地址需要服务器本身具备可用 IPv6。生成的路由默认直连，并拦截私网、回环、链路本地、组播等保留目的地址。
 
-状态 schema 为 `schema_version: 1`，`nodes` 数组最多 128 项，ID 与端口不得重复。每个节点必须恰好具有对应字段；未知节点字段被拒绝。
+## REALITY 与 XHTTP
 
-| 字段 | 约束 |
+SNI 应与目标 TLS 服务的证书相容，target 使用 `host:port`，IPv6 目标使用 `[IPv6]:port`。目标需可从服务器访问并支持合适的 TLS；XHTTP + REALITY 目标应支持 TLS 1.3 和 H2。
+
+交互默认 SNI 为 `genshin.hoyoverse.com`，目标为 `SNI:443`。UUID、密钥对和 ShortID 自动生成；ShortID 为 2–16 位偶数长度十六进制。分享链接只包含客户端所需公钥，不包含服务端私钥。
+
+XHTTP 路径以 `/` 开头，长度 2–128，只接受 ASCII 字母、数字、`/`、`_`、`-`，不能包含连续斜线。默认随机生成路径；模式支持 `packet-up`（默认）、`auto`、`stream-up`、`stream-one`。
+
+```sh
+xy add vless-reality reality-a 'REALITY' 1443 server.example.com genshin.hoyoverse.com genshin.hoyoverse.com:443
+xy add vless-xhttp xhttp-a 'XHTTP' 2443 server.example.com genshin.hoyoverse.com genshin.hoyoverse.com:443 /a7d390ef52c1068b packet-up
+xy add shadowsocks ss-a 'SS2022' 3443 server.example.com
+```
+
+## TLS 与其他协议
+
+TLS 节点读取现有证书和匹配私钥，检查生效时间、有效期、SAN 与 SNI、公私钥对应关系。文件使用绝对路径，必须是普通文件且不能是符号链接；证书和私钥不可被组或其他用户写入，私钥不可被其他用户读取。仅接受未加密 PEM 私钥。
+
+证书和私钥内嵌到私密状态与导出文件，跨机器迁移无需原始证书路径。脚本不申请 ACME 证书，分享链接不包含服务器私钥，也不默认跳过 TLS 验证。自签证书需要客户端信任。
+
+```sh
+xy add vless-ws ws-a 'VLESS WS' 8443 server.example.com server.example.com /random-ws-path /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
+xy add anytls at-a 'AnyTLS' 8444 server.example.com server.example.com /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
+xy add hysteria2 hy-a 'HY2' 8445 server.example.com server.example.com /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
+xy add tuicv5 tc-a 'TUIC v5' 8446 server.example.com server.example.com /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
+xy add socks5 sk-a 'SOCKS5' 8447 server.example.com
+```
+
+未提供的 UUID、用户名和密码自动生成。HY2 / TUIC 使用 UDP，防火墙和安全组应开放对应 UDP 端口。SOCKS5 始终启用用户名密码认证。
+
+## 修改与分享
+
+所有节点可修改名称、端口和对外地址，其他字段按协议提供：
+
+| 协议 | 其他可修改字段 |
 | --- | --- |
-| `id` | 字母开头，随后为字母、数字、`_` 或 `-`，1–32 字符 |
-| `name` | 1–128 字符，无控制字符 |
-| `type` | 上述三种类型之一 |
-| `port` | JSON 整数，1–65535 |
-| `address` | IP 或 ASCII 域名，不含协议前缀、端口或路径 |
-| VLESS 额外字段 | `uuid`, `private_key`, `public_key`, `short_id`, `sni`, `target` |
-| XHTTP 额外字段 | REALITY 的六个字段，加 `path`, `mode` |
-| Shadowsocks 额外字段 | `method`, `password`，method 固定上述 SS2022 算法，password 为 16 字节标准 Base64 |
+| REALITY / XHTTP | UUID、SNI、target、ShortID、成对密钥 |
+| XHTTP | path、mode |
+| SS2022 | password |
+| VLESS WS | UUID、SNI、path、TLS 证书与私钥 |
+| AnyTLS / HY2 | password、SNI、TLS 证书与私钥 |
+| TUIC v5 | UUID、password、SNI、TLS 证书与私钥 |
+| SOCKS5 | username、password |
 
-状态、配置和备份包含认证资料，应按管理器的目录及权限要求保管。只有显式调用分享操作才展示客户端认证信息。函数内部通过 stdin 将敏感值交给 JSON/校验程序，避免把密钥放进它们的命令行参数。
-
-## 模块函数
-
-这些函数只有被调用时才执行；source 模块不会修改系统。
-
-```text
-protocol_new vless-reality ID NAME PORT ADDRESS SNI TARGET [UUID PRIVATE PUBLIC SHORTID]
-protocol_new vless-xhttp ID NAME PORT ADDRESS SNI TARGET PATH MODE [UUID PRIVATE PUBLIC SHORTID]
-protocol_new shadowsocks ID NAME PORT ADDRESS [PASSWORD]
-protocol_validate_node NODE_JSON [strict|maintenance]
-protocol_generate STATE_FILE OUTPUT_FILE [strict|maintenance]
-protocol_share NODE_JSON
+```sh
+xy edit reality-a address server.example.com
+xy edit reality-a short_id a4b7
+xy edit xhttp-a path /new-random-path
+xy edit xhttp-a mode packet-up
+xy edit ws-a tls /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key server.example.com
+xy share reality-a
 ```
 
-成功返回 0；失败返回非 0 并向 stderr 写诊断。`new` 输出完整节点 JSON，`share` 输出单条 URI；其他操作成功时不输出秘密。`generate` 生成限制权限的配置文件，事务切换、最终运行组权限及 Xray 原生校验由上层管理器执行。REALITY 未提供固定密钥参数时，使用 `XRAY_BIN` 或 `XM_BIN` 指向的 Xray 生成；固定版本输出的第二项为 `Password (PublicKey)`，它是客户端需要的 X25519 公钥。`XM_PYTHON` 仅为指定可用 Python 解释器的可选环境覆盖，Linux 默认 `python3`。
+ID 和协议类型固定。更新 REALITY 密钥时必须同时提供匹配的私钥和公钥；TLS 更新同时提供证书和私钥，可附新 SNI。日常秘密输入建议使用菜单。
 
-生成配置具有 direct 默认出口、block 出口和显式私网/保留网段阻断规则，使用 `IPOnDemand`，不依赖 geoip/geosite 文件，不更改全局 DNS。私网、loopback、链路本地与组播目的流量被阻断；不提供代理访问服务器内网的开关。REALITY 的伪装 target 不属于代理出站路由。生产配置使用 `loglevel: warning` 与 `access: none`，禁用逐连接访问日志。没有节点时，`inbounds: []`，Xray 保持运行且不开放任何监听。
+已有证书过期时，仍可查看、导出、删除或更换证书；新建、导入及变更节点需通过有效期检查。分享链接包含客户端认证资料，第三方客户端需支持相应协议和传输。
 
-Shadowsocks 分享采用 SIP002 的 AEAD-2022 格式：method/password 分别 percent-encode，禁止将整个 userinfo Base64URL 编码。VLESS 分享参照 v2rayN 的 URI 字段约定。不同客户端的导入实现可能有差异，验收互通使用同版本 Xray 客户端；不声明所有第三方客户端均实测通过。
+## 出站路由
 
-## 检查与来源
+Xray 节点可各自保存一个上游，支持以下分享链接：
 
-```bash
-XRAY_BIN=/path/to/xray bash tests/test-protocol.sh
-XRAY_BIN=/path/to/xray bash tests/test-protocol.sh --e2e
-XRAY_BIN=/path/to/xray bash tests/test-xhttp.sh --e2e
-```
+- `ss://`：SS2022 AES-128、AES-256、ChaCha20，以及受支持的 AEAD Shadowsocks。SS2022 AES 支持 `PSK:identity` 密钥链，ChaCha20 使用单密钥。
+- `vless://`：TLS / REALITY 与 RAW / WS / XHTTP 的受支持组合。
+- `trojan://`：TLS RAW / WS 上游。
+- `socks://` / `socks5://`：带用户名密码认证的上游。
 
-第一项执行非法输入、URI 编码、IPv4 fallback、空节点及 Vision/SS2022 原生配置检查；独立 XHTTP 测试覆盖第三种协议。第二项在临时 loopback 端口启动真实 Xray 客户端与服务端，使用 SOCKS5 请求公网 HTTPS，TLS 检查保持开启；默认请求目标为 `https://example.com`，REALITY SNI/伪装目标为 `www.cloudflare.com` / `www.cloudflare.com:443`。需要网络与本地端口绑定能力。临时凭据和进程退出时清理。可通过 `XM_REALITY_SNI`、`XM_REALITY_TARGET`、`XM_E2E_URL` 修改测试目标；这些参数只影响测试。目标站点与区域可达性会影响 REALITY 握手：在本次授权服务器中 Cloudflare 目标互通通过，Microsoft 目标未通过，因此不能把任意公开 TLS 站点当成必然可用。`XM_E2E_DEBUG=1` 仅为随机测试 fixture 开启详细诊断及访问日志，生产日志配置保持不变。
+这是上游出站支持列表，不能据此添加同类型入站。订阅、插件、辅助核心协议、未知或重复参数、不兼容传输及不安全 TLS 参数会被拒绝。链接为单行，最多 8192 字符。
 
-来源核实日期：2026-10-02。实现为原创，以下资料用于核对语义和格式：
+`all` 模式让当前节点流量经上游；`rules` 模式使用域名和 IP JSON 数组，至少一类非空，任一匹配即可经上游。域名写为 `domain:example.com` 或 `full:example.com`，IP 接受 IPv4 / IPv6 或 CIDR。未命中流量直连，私网及保留地址拦截优先。
 
-- [Xray v26.3.27 X25519 输出源码](https://github.com/XTLS/Xray-core/blob/v26.3.27/main/commands/all/curve25519.go)。
-- [Xray v26.3.27 传输配置源码](https://github.com/XTLS/Xray-core/blob/v26.3.27/infra/conf/transport_internet.go)。
-- [REALITY 文档](https://xtls.github.io/config/transport.html)、[Shadowsocks 文档](https://xtls.github.io/config/inbounds/shadowsocks.html)。在线文档可能继续更新，固定版本最终以源码及实测为准。
-- [SIP002 URI 标准](https://shadowsocks.org/doc/sip002.html)。
-- [v2rayN VLESS URI](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/VLESSFmt.cs)。仅核对字段映射，未宣称特定 v2rayN 发布版本的互通结果。
+路由保存在私密节点状态和导出文件中。当前入站的分享链接不包含服务器上游秘密，`route show` 只显示脱敏摘要。
 
-## XHTTP + REALITY
+## 配置文件
 
-核实日期 2026-10-03，兼容基线 **v26.3.27**，最新预览版源码核实 **v26.9.30**。`path` 为 2–128 字符，以 `/` 开头，只含 ASCII 字母、数字、`/`、`_`、`-`，禁止连续斜线；交互默认使用随机路径。`mode` 只允许 `packet-up`（默认）、`auto`、`stream-up`、`stream-one`。固定基线的 `auto` 在 REALITY 客户端实际选择 `stream-one`。XHTTP 不添加 `xtls-rprx-vision` flow；分享链接具有 `type=xhttp`、`path`、`mode` 以及 REALITY 客户端字段，不包含服务端私钥。无需 Nginx 或外部证书。REALITY 目标应支持 TLS 1.3 和 H2，交互默认 SNI 为 `genshin.hoyoverse.com`、target 为 `genshin.hoyoverse.com:443`。
+状态使用 `schema_version: 1`，最多 128 个节点，导入文件上限 16 MiB。节点 ID、名称、端口、凭据及相关路径按规则检查冲突，未知字段被拒绝。
 
-`tests/test-xhttp.sh` 检查非法 path/mode、字段缺失、随机凭据、IPv6/名称 URI 编码以及四种模式原生配置。加 `--e2e` 后在随机 loopback 端口运行真实 Xray 双方与本地 HTTP fixture，逐模式校验响应；仅测试副本移除私网阻断以访问自身 fixture，产品路由保持私网阻断。REALITY 握手仍需访问配置的公网伪装目标。第三方 GUI 客户端导入兼容未实测。
+出站路由使用可选 `outbound_route` 字段，包含 `uri`、`mode`、`domains`、`ips`。未配置路由的文件可直接导入；含路由的文件应导入已支持该功能的管理器。
 
-- [v26.3.27 XHTTP schema 与 REALITY 传输限制](https://github.com/XTLS/Xray-core/blob/v26.3.27/infra/conf/transport_internet.go)。
-- [v26.3.27 XHTTP 模式运行选择](https://github.com/XTLS/Xray-core/blob/v26.3.27/transport/internet/splithttp/dialer.go)。
-- [v26.9.30 传输 schema](https://github.com/XTLS/Xray-core/blob/v26.9.30/infra/conf/transport_internet.go)。
-- [官方 VLESS URI 标准提案（XHTTP path/mode 与 REALITY 字段）](https://github.com/XTLS/Xray-core/discussions/716)。
-
-## 扩展五协议与双核心
-
-2026-10-03 核实固定辅助核心 **sing-box 1.14.2**。Xray 仍处理 REALITY、XHTTP、SS2022，并增加 `vless-ws`、`socks5`。AnyTLS、HY2 (`hysteria2`)、TUIC v5 (`tuicv5`) 使用辅助核心，独立服务由平台负责。它们不伪装成 Xray 入站。
-
-| 新类型 | 状态额外字段 | 传输/安全 |
-| --- | --- | --- |
-| `vless-ws` | uuid, path, sni, tls_cert, tls_key | VLESS + WS + TLS；TCP，无 Vision flow |
-| `socks5` | username, password | 始终密码认证；TCP/UDP；SOCKS 本身无传输加密 |
-| `anytls` | password, sni, tls_cert, tls_key | AnyTLS + TLS；TCP，默认 padding |
-| `hysteria2` | password, sni, tls_cert, tls_key | QUIC/UDP + TLS；不设置硬编码带宽或混淆 |
-| `tuicv5` | uuid, password, sni, tls_cert, tls_key | QUIC/UDP + TLS；cubic，ALPN h3，0-RTT 关闭 |
-
-```text
-protocol_new vless-ws ID NAME PORT ADDRESS SNI PATH CERT_FILE KEY_FILE [UUID]
-protocol_new socks5 ID NAME PORT ADDRESS [USERNAME PASSWORD]
-protocol_new anytls ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [PASSWORD]
-protocol_new hysteria2 ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [PASSWORD]
-protocol_new tuicv5 ID NAME PORT ADDRESS SNI CERT_FILE KEY_FILE [UUID PASSWORD]
-protocol_tls_read CERT_FILE KEY_FILE SNI
-protocol_generate_extra STATE_FILE OUTPUT_FILE [strict|maintenance]
-protocol_has_extra STATE_FILE
-protocol_engine TYPE
-```
-
-TLS PEM 内嵌状态与导出文件，可在新机器恢复，无需原证书路径。读取证书最大 256 KiB、私钥最大 16 KiB，绝对普通文件且拒符号链接，不可被组/其他用户写入；私钥禁止其他用户读取。校验证书生效时间、过期时间、SAN 与 SNI、公私钥配对。仅接受未加密 PEM 私钥。敏感 PEM 和认证资料通过 stdin 交给解析/加密程序，绝不放入子进程参数。自签证书需要用户客户端显式信任对应证书；分享不默认跳过 TLS 验证。TLS 分享不包含服务器 PEM 私钥。
-
-新节点 UUID/密码/用户名使用系统安全随机数。SOCKS 用户名 3–64 ASCII 字母数字、_、-，密码 16–128；其余新密码 16–256 无控制字符。WS 路径与 XHTTP 路径规则一致。端口、ID、名称、凭据冲突由上层事务与交互校验。`protocol_generate` 过滤辅助协议，`protocol_generate_extra` 过滤 Xray 协议，各自产生 0600 配置；辅助出口使用 direct，显式 reject 私网及保留网段，不修改全局 DNS。
-
-```bash
-XRAY_BIN=/path/to/xray XM_EXTRA_BIN=/path/to/sing-box bash tests/test-extra-protocol.sh
-XRAY_BIN=/path/to/xray XM_EXTRA_BIN=/path/to/sing-box bash tests/test-extra-e2e.sh
-```
-
-首项测试五种节点、非法参数、TLS 身份/权限、迁移 PEM、分享与双核心原生配置；第二项依次启动真实双方，TLS 保持验证并信任临时测试证书，SOCKS 也进行密码认证，请求自身精确 loopback 端口的 HTTP fixture。测试副本只放行该 IP/端口，产品仍阻断私网。未宣称第三方 GUI 全部导入互通。
-
-- [sing-box 1.14.2 官方发布](https://github.com/SagerNet/sing-box/releases/tag/v1.14.2)。
-- [固定版 TLS schema 与内嵌 PEM](https://github.com/SagerNet/sing-box/blob/v1.14.2/option/tls.go)。
-- [AnyTLS 入站](https://sing-box.sagernet.org/configuration/inbound/anytls/)、[HY2 入站](https://sing-box.sagernet.org/configuration/inbound/hysteria2/)、[TUIC 入站](https://sing-box.sagernet.org/configuration/inbound/tuic/)。
-- [HY2 官方 URI](https://v2.hysteria.network/docs/developers/URI-Scheme/)。
-
-分享格式另外核实 [AnyTLS 官方 URI](https://github.com/anytls/anytls-go/blob/main/docs/uri_scheme.md)、[v2rayN TUIC URI 解析](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/TuicFmt.cs)、[v2rayN SOCKS URI 解析](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Handler/Fmt/SocksFmt.cs)。SOCKS 使用标准 `socks5://username:password@host:port` percent-encoded userinfo；客户端支持情况需各自确认。
-
-TLS 维护模式是显式参数 `protocol_validate_node NODE_JSON maintenance`，仅略过证书过期或尚未生效的时间检查，保留 schema、PEM、SAN 和公私钥配对检查。只用于读取既有状态以续期、删除或私密导出；新建、导入、候选配置及修改默认严格校验。不存在全局环境变量开关；任意其他模式会拒绝。
-
-两种配置生成器也接受显式第三参数 `[strict|maintenance]`，默认严格。Shell 只有删除或编辑事务在逐节点比较新旧状态后才使用维护生成：新增或发生任何变化的节点严格验证，完全未变化的已有节点可只略过证书时间检查。这样能够逐个删除或续期多个已过期节点；添加与导入保持全部严格校验。生成器不自行证明节点未变化，上层差异检查必须先通过，不能用此模式绕过候选校验。
+请通过菜单、CLI 或完整导入修改节点，不直接编辑生成的核心配置。状态与导出包含秘密，应保持私密权限。

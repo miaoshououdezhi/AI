@@ -42,7 +42,7 @@ for mode in ('color','no_color','dumb'):
   assert '\x1b[38;2;255;0;0m[错误] bootstrap-color\x1b[0m'.encode() in data,data
   assert '\x1b[38;2;255;0;0m[错误] platform-color\x1b[0m'.encode() in data,data
   assert '\x1b[38;2;255;0;0m[错误] 协议：'.encode() in data,data
-  assert '\x1b[38;2;0;191;255m[1]  \x1b[38;2;255;255;255m安装核心\x1b[0m'.encode() in data,data
+  assert '\x1b[38;2;0;191;255m[1]   \x1b[38;2;255;255;255m安装核心\x1b[0m'.encode() in data,data
   import re
   assert set(re.findall(rb'\x1b\[([^m]+)m',data)) <= {b'38;2;0;191;255',b'38;2;0;255;255',b'38;2;0;255;0',b'38;2;255;0;0',b'38;2;255;255;255',b'0'},data
  else:assert b'\x1b[' not in data,(mode,data)
@@ -75,3 +75,22 @@ PYWRAPPER
     [[ $(grep -c '未知' "$scratch/formatter-failed") == 6 ]] || fail 'formatter failure lost unknown rows'
 ) || fail 'batch overview fallback'
 printf 'PASS batch overview uses one formatter and always renders six fields on failure\n'
+
+# Render the actual menu at both widths, independent of installed state/tools.
+(
+    # shellcheck disable=SC1090
+    source <(sed -n '/^xm_menu_render() {/,/^}/p' "$repo/xray-manager.sh")
+    XM_STATE=$scratch/absent-state
+    xm_menu_system_info() { :; }
+    COLUMNS=80 xm_menu_render 2> "$scratch/wide-menu"
+    COLUMNS=40 xm_menu_render 2> "$scratch/narrow-menu"
+    python3 - "$scratch/wide-menu" "$scratch/narrow-menu" <<'PYMENU'
+import re,sys
+for path in sys.argv[1:]:
+    lines=open(path).read().splitlines()
+    starts=[m.start(1) for line in lines if (m:=re.match(r'^\[\d+\]\s+(\S+)',line))]
+    assert len(starts)>=10 and set(starts)=={6},(path,starts)
+    assert any(re.match(r'^\[5\]   系统更新$',line) for line in lines),path
+print('PASS wide/narrow main menu captions share the same left column')
+PYMENU
+) || fail 'main menu caption alignment'

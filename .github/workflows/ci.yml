@@ -83,6 +83,8 @@ jobs:
               source /src/lib/platform.sh
               source /src/lib/protocol.sh
               platform_detect && platform_dependencies || exit 1
+              bash /src/tests/test-clean-uninstall.sh || exit 1
+              bash /src/tests/test-ui.sh || exit 1
               export XM_ROOT=/tmp/xm-smoke
               source /src/lib/common.sh
               platform_prepare || exit 1

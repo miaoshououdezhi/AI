@@ -1559,7 +1559,9 @@ try:
    if p.is_symlink():raise ValueError('symlink '+str(p))
    names=allowed.get(p.parent,set())
    extra=p.parent==etc and re.fullmatch(r'trojan-retired-backup\.[A-Za-z0-9]{8}',p.name)
-   rotated=p.parent==logs and re.fullmatch(r'(console|extra-console|restart-schedule|system-update-schedule)\.log\.[1-4](?:\.gz)?',p.name)
+   # Accept legacy default dateext archives as well as our numeric rotations.
+   # Keep the four owned log basenames, direct parent and file-type gates.
+   rotated=p.parent==logs and re.fullmatch(r'(console|extra-console|restart-schedule|system-update-schedule)\.log(?:\.[1-4]|-[0-9]{8})(?:\.gz)?',p.name)
    if p.name not in names and not extra and not rotated:raise ValueError('unknown file retained: '+str(p))
    if p.is_dir() and p not in allowed:raise ValueError('unexpected directory '+str(p))
    if not(p.is_dir() or p.is_file()):raise ValueError('non-regular file '+str(p))
