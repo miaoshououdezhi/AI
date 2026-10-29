@@ -44,7 +44,7 @@ xm_ready() { return 0; }
 platform_random_port() { printf '25001\n'; }
 platform_port_available() { return 0; }
 platform_public_ip() { printf '8.8.8.8\n'; }
-xm_dispatch() { printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$scratch/call"; }
+xm_dispatch() { printf '%s\0' "$@" | python3 -c 'import json,sys; json.dump(sys.stdin.read().split("\0")[:-1],sys.stdout)' > "$scratch/call"; }
 for choice in 1 2; do
     printf '3\n\n\n\n\n%s\n\n' "$choice" | xm_menu_add > "$scratch/out" 2> "$scratch/add-result"
     mapfile -t args < <(jq -r '.[]' "$scratch/call")
