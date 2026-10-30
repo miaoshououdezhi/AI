@@ -21,7 +21,7 @@ CORE
 done
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$scratch/key.pem" -out "$scratch/cert.pem" -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' -days 2 >/dev/null 2>&1 || fail 'certificate fixture'
 chmod 0600 "$scratch/key.pem"
-protocol_new shadowsocks ss 'SS' 27001 127.0.0.1 > "$scratch/ss" || fail 'SS fixture'
+protocol_new shadowsocks ss 'SS' 27001 127.0.0.1 '' 2022-blake3-aes-256-gcm > "$scratch/ss" || fail 'SS fixture'
 protocol_new anytls at 'AnyTLS' 27002 127.0.0.1 localhost "$scratch/cert.pem" "$scratch/key.pem" > "$scratch/at" || fail 'AnyTLS fixture'
 protocol_new vless-ws ws 'VLESS WS' 27003 127.0.0.1 localhost /test-ws "$scratch/cert.pem" "$scratch/key.pem" > "$scratch/ws" || fail 'WS fixture'
 jq -n --slurpfile a "$scratch/ss" --slurpfile b "$scratch/at" --slurpfile c "$scratch/ws" '{schema_version:1,core_version:"v26.3.27",nodes:[$a[0],$b[0],$c[0]]}' > "$scratch/portable"

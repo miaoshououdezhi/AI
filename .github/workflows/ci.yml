@@ -38,6 +38,10 @@ jobs:
         run: bash tests/test-interactive.sh
       - name: Management script update and code rollback
         run: bash tests/test-manager-update.sh
+      - name: Node creation and terminal layout
+        run: bash tests/test-node-ux.sh
+      - name: SS2022 algorithms and key validation
+        run: bash tests/test-ss2022.sh
       - name: Node edits and state transactions
         run: bash tests/test-edit.sh
       - name: Per-node outbound routes, migration and rollback
@@ -85,20 +89,24 @@ jobs:
               platform_detect && platform_dependencies || exit 1
               bash /src/tests/test-clean-uninstall.sh || exit 1
               bash /src/tests/test-ui.sh || exit 1
+              bash /src/tests/test-node-ux.sh || exit 1
               export XM_ROOT=/tmp/xm-smoke
               source /src/lib/common.sh
               platform_prepare || exit 1
-              platform_fetch_core v26.3.27 "$XM_BIN" || exit 1
-              printf "{\"schema_version\":1,\"core_version\":\"v26.3.27\",\"nodes\":[]}\n" > "$XM_ETC/state.json"
+              platform_fetch_core v26.10.29 "$XM_BIN" || exit 1
+              printf "{\"schema_version\":1,\"core_version\":\"v26.10.29\",\"nodes\":[]}\n" > "$XM_ETC/state.json"
               protocol_generate "$XM_ETC/state.json" "$XM_ETC/config.json" || exit 1
               "$XM_BIN" run -test -config "$XM_ETC/config.json" || exit 1
+              XRAY_BIN="$XM_BIN" bash /src/tests/test-ss2022.sh || exit 1
               XRAY_BIN="$XM_BIN" bash /src/tests/test-xhttp.sh || exit 1
               XRAY_BIN="$XM_BIN" bash /src/tests/test-outbound-protocol.sh || exit 1
+              XRAY_BIN="$XM_BIN" bash /src/tests/test-outbound-e2e.sh || exit 1
               primary_smoke_bin=$XM_BIN
               export XM_ROOT=
               source /src/lib/common.sh
               platform_prepare && platform_extra_ensure || exit 1
               XRAY_BIN="$primary_smoke_bin" XM_EXTRA_BIN="$XM_EXTRA_BIN" bash /src/tests/test-extra-protocol.sh || exit 1
+              XRAY_BIN="$primary_smoke_bin" XM_EXTRA_BIN="$XM_EXTRA_BIN" bash /src/tests/test-extra-e2e.sh || exit 1
             '\''
           '
 # Container jobs do not claim systemd/OpenRC boot or ARM64 service verification.

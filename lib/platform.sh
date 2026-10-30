@@ -474,7 +474,7 @@ platform_health() {
     [[ -x $XM_BIN && -f $XM_ETC/config.json && -f $XM_ETC/state.json ]] || return 1
     pid=$(_platform_core_pid) || return 1
     "$XM_BIN" run -test -config "$XM_ETC/config.json" >/dev/null 2>&1 || { _platform_error '核心拒绝当前配置。'; return 1; }
-    nodes=$(jq -r '.nodes | if type != "array" then error("nodes must be array") else .[] | select(.type!="anytls" and .type!="hysteria2" and .type!="tuicv5") | [.port,.type] | @tsv end' "$XM_ETC/state.json") || return 1
+    nodes=$(jq -r '.nodes | if type != "array" then error("nodes must be array") else .[] | select(.type!="anytls" and .type!="tuicv5" and (.type!="hysteria2" or .engine=="xray")) | [.port,.type] | @tsv end' "$XM_ETC/state.json") || return 1
     sleep 1
     platform_service status >/dev/null 2>&1 || { _platform_error 'Xray 启动后退出。'; return 1; }
     pid_after=$(_platform_core_pid) || return 1
@@ -482,11 +482,14 @@ platform_health() {
     [[ -n $nodes ]] || return 0
     while IFS=$'\t' read -r port type; do
         [[ $port =~ ^[0-9]+$ && ${#port} -le 5 ]] && ((10#$port >= 1 && 10#$port <= 65535)) || return 1
-        tcp=$(ss -H -ltnp "sport = :$port") || return 1
-        [[ $tcp == *"pid=$pid,"* ]] || { _platform_error "Xray 核心未监听 TCP 端口：$port"; return 1; }
-        if [[ $type == shadowsocks ]]; then
+        # Native HY2 listens on QUIC/UDP only; the other Xray inbounds require TCP.
+        if [[ $type != hysteria2 ]]; then
+            tcp=$(ss -H -ltnp "sport = :$port") || return 1
+            [[ $tcp == *"pid=$pid,"* ]] || { _platform_error "Xray 核心未监听 TCP 端口：$port"; return 1; }
+        fi
+        if [[ $type == shadowsocks || $type == hysteria2 ]]; then
             udp=$(ss -H -lunp "sport = :$port") || return 1
-            [[ $udp == *"pid=$pid,"* ]] || { _platform_error "Xray 核心未监听 Shadowsocks UDP 端口：$port"; return 1; }
+            [[ $udp == *"pid=$pid,"* ]] || { _platform_error "Xray 核心未监听 $type UDP 端口：$port"; return 1; }
         fi
     done <<< "$nodes"
 }
@@ -1357,11 +1360,11 @@ PY
     sleep 1
     after=$(readlink "/proc/$pid/exe") || return 1
     [[ $after == "$XM_EXTRA_BIN" ]] && platform_extra_service status >/dev/null 2>&1 || return 1
-    nodes=$(jq -r '.nodes[] | select(.type=="anytls" or .type=="hysteria2" or .type=="tuicv5") | [.port,.type] | @tsv' "$XM_ETC/state.json") || return 1
+    nodes=$(jq -r '.nodes[] | select(.type=="anytls" or (.type=="hysteria2" and (.engine // "sing-box") == "sing-box") or .type=="tuicv5") | [.port,.type] | @tsv' "$XM_ETC/state.json") || return 1
     while IFS=$'\t' read -r port type; do
         [[ -n $port ]] || continue
         [[ $port =~ ^[0-9]{1,5}$ ]] && ((10#$port>=1 && 10#$port<=65535)) || return 1
-        if [[ $type == anytls ]]; then sockets=$(ss -H -ltnp "sport = :$port"); else sockets=$(ss -H -lunp "sport = :$port"); fi
+        if [[ $type == anytls ]]; then sockets=$(ss -H -ltnp "sport = :$port"); else sockets=$(ss -H -lunp "sport = :$port"); fi || return 1
         [[ $sockets == *"pid=$pid,"* ]] || { _platform_error "辅助核心未监听 $type 端口 ${port}。"; return 1; }
     done <<< "$nodes"
 }

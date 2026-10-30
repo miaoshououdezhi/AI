@@ -4,7 +4,9 @@
 
 支持 Debian 12 / 13（systemd）、Alpine 3.23 / 3.24（OpenRC），架构为 amd64 和 arm64。运行需要 Bash ≥ 4.4，安装器自动准备依赖。
 
-Xray 默认版本为 v26.3.27，支持选择官方版本升级及回退。AnyTLS、HY2、TUIC v5 使用按需安装的 sing-box 1.14.2。下载来自各核心的官方 HTTPS 发布资源，检查摘要、归档路径、文件类型和架构；下载或校验失败时保留旧核心。
+Xray 默认版本为 v26.10.29，支持选择官方版本升级及回退。新建 HY2 由 Xray 运行。历史辅助核心节点继续使用 sing-box 1.14.2。下载来自各核心的官方 HTTPS 发布资源，检查摘要、归档路径、文件类型和架构；下载或校验失败时保留旧核心。
+
+新 HY2 要求实际安装的 Xray 为 v26.10.29 或更新版本，较旧版本会提示先升级。升级管理脚本保留现有核心；旧 HY2 未设置 `engine` 或为 `sing-box` 时保持辅助核心运行，新 HY2 的 `engine=xray` 使用主核心 UDP 健康检查。
 
 ## 服务与权限
 
@@ -13,7 +15,7 @@ Xray 默认版本为 v26.3.27，支持选择官方版本升级及回退。AnyTLS
 | 服务名 | `xray-manager` | `xray-manager-extra` |
 | 程序 | `/opt/xray-manager/bin/xray` | `/opt/xray-manager/bin/sing-box` |
 | 配置 | `/etc/xray-manager/config.json` | `/etc/xray-manager/extra.json` |
-| 协议 | REALITY、XHTTP、SS2022、VLESS WS、SOCKS5 | AnyTLS、HY2、TUIC v5 |
+| 协议 | REALITY、XHTTP、SS2022、VLESS WS、HY2、SOCKS5 | 历史辅助核心节点 |
 
 两核心使用专用非登录账户 `xray-manager`。状态和配置使用受限权限，导出文件使用 `0600`。首次安装不创建节点；辅助核心在需要时安装，删除最后一个辅助节点后停用其服务。
 

@@ -145,3 +145,48 @@ for no_color,term,want_color in ((False,'xterm',True),(True,'xterm',False),(Fals
  assert (b'\x1b[38;2;0;255;255m' in out and b'\x1b[38;2;0;191;255m' in out and b'\x1b[38;2;255;0;0m' in out)==want_color, (term,no_color,out)
 print('PASS: human Python stderr labels/TTY palette, NO_COLOR/TERM=dumb and clean machine stdout')
 PY
+
+# Native Xray HY2 must not be attributed to sing-box. Existing unmarked and
+# explicit sing-box HY2 stay on the auxiliary UDP health path.
+(
+    health_root=$tmp/extra-health
+    mkdir -p "$health_root"
+    XM_EXTRA_BIN=$health_root/sing-box
+    XM_EXTRA_CONFIG=$health_root/extra.json
+    XM_ETC=$health_root
+    printf '#!/bin/sh\nexit 0\n' > "$XM_EXTRA_BIN"
+    chmod 0700 "$XM_EXTRA_BIN"
+    printf '{}\n' > "$XM_EXTRA_CONFIG"
+    cat > "$XM_ETC/state.json" <<'STATE'
+{"nodes":[{"type":"hysteria2","engine":"xray","port":35001},{"type":"hysteria2","port":35004},{"type":"hysteria2","engine":"sing-box","port":35005},{"type":"anytls","port":35006},{"type":"tuicv5","port":35007},{"type":"shadowsocks","port":35002}]}
+STATE
+    _platform_extra_paths() { return 0; }
+    platform_extra_service() { return 0; }
+    _platform_python() { cat >/dev/null; printf '5678\n'; }
+    readlink() { [[ $1 == /proc/5678/exe ]] || return 1; printf '%s\n' "$XM_EXTRA_BIN"; }
+    sleep() { :; }
+    HEALTH_CASE=good
+    ss() {
+        printf '%s\n' "$*" >> "$health_root/socket-calls"
+        case "$*" in
+            '-H -lunp sport = :35004'|'-H -lunp sport = :35005'|'-H -lunp sport = :35007') ;;
+            '-H -ltnp sport = :35006') ;;
+            *) return 98 ;;
+        esac
+        if [[ $* == '-H -lunp sport = :35004' ]]; then
+            case $HEALTH_CASE in
+                missing) return 0 ;;
+                wrong-pid) printf 'UNCONN users:(("xray",pid=1234,fd=9))\n'; return 0 ;;
+                command-failed) printf 'UNCONN users:(("sing-box",pid=5678,fd=9))\n'; return 1 ;;
+            esac
+        fi
+        printf 'LISTENER users:(("sing-box",pid=5678,fd=9))\n'
+    }
+    : > "$health_root/socket-calls"
+    platform_extra_health || fail 'legacy HY2 mixed auxiliary health selection'
+    [[ $(wc -l < "$health_root/socket-calls") -eq 4 ]] || fail 'extra health queried Xray nodes'
+    for HEALTH_CASE in missing wrong-pid command-failed; do
+        reject platform_extra_health
+    done
+)
+printf 'PASS: auxiliary health retains legacy/explicit sing-box HY2 UDP ownership and excludes native Xray HY2\n'

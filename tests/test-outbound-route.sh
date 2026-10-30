@@ -145,8 +145,8 @@ pass '0600 full-route export/import, invalid-route refusal and route-free legacy
 XM_SELECTED_NODE=$(jq -c '.nodes[0]' "$XM_STATE")
 printf '6\n1\n%s\n' "$uri_one" > "$scratch/menu-input"
 xm_menu_node_details "$XM_SELECTED_NODE" < "$scratch/menu-input" >/dev/null 2> "$scratch/menu-add.log" || fail 'detail menu route add'
-grep -q '\[6\].*添加出站路由' "$scratch/menu-add.log" || fail 'details add action missing'
-grep -q '\[7\].*删除出站路由' "$scratch/menu-add.log" || fail 'details delete action missing'
+grep -q '\[6\].*设置出站 / 落地节点' "$scratch/menu-add.log" || fail 'details add action missing'
+grep -q '\[7\].*删除出站 / 恢复直连' "$scratch/menu-add.log" || fail 'details delete action missing'
 XM_SELECTED_NODE=$(jq -c '.nodes[0]' "$XM_STATE")
 printf '0\n' > "$scratch/menu-input"
 xm_menu_node_details "$XM_SELECTED_NODE" < "$scratch/menu-input" >/dev/null 2> "$scratch/menu-summary.log" || fail 'detail route summary'

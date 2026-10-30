@@ -50,7 +50,7 @@ done
 pass '64 fixture argument roundtrips preserve leading dashes and empty values'
 
 
-printf '3\n\n\n\n\n\n' > "$TEST_ROOT/input"
+printf '3\n\n\n\n\n\n\n' > "$TEST_ROOT/input"
 xm_menu_add < "$TEST_ROOT/input" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/default.log" || fail 'default SS creation'
 jq -e '.[0]=="add" and .[1]=="shadowsocks" and (.[2]|test("^node-[0-9a-f]{8}$")) and (.[3]|test("^SS2022-[0-9a-f]{8}$")) and .[4]=="25001" and .[5]=="8.8.8.8"' "$TEST_CALL" >/dev/null || fail 'random defaults not accepted'
 mapfile -t TEST_ARGS < <(jq -r '.[]' "$TEST_CALL")
@@ -59,14 +59,14 @@ TEST_PASSWORD=$(jq -r .password "$TEST_ROOT/node.json")
 if grep -Fq "$TEST_PASSWORD" "$TEST_ROOT/default.log" "$TEST_ROOT/stdout"; then fail 'default secret leaked'; fi
 pass 'Enter accepts random ID/name/free port/secret and discovers public IP without leaking secret'
 
-printf '3\n--invalid\ncustom-a\nname\n0\n25002\n25001\nbad/path\n8.8.4.4\nshort\n\n' > "$TEST_ROOT/input"
+printf '3\n--invalid\ncustom-a\nname\n0\n25002\n25001\nbad/path\n8.8.4.4\n1\nshort\n\n' > "$TEST_ROOT/input"
 xm_menu_add < "$TEST_ROOT/input" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/retry.log" || fail 'field validation retries'
 jq -e '.[2]=="custom-a" and .[3]=="name" and .[4]=="25001" and .[5]=="8.8.4.4"' "$TEST_CALL" >/dev/null || fail 'retry accepted wrong fields'
 grep -q '端口' "$TEST_ROOT/retry.log" && grep -q 'ID' "$TEST_ROOT/retry.log" || fail 'missing immediate field feedback'
 pass 'invalid ID, zero/occupied port, address and SS password re-prompt their field'
 
 TEST_IP_FAIL=1; TEST_PORT_FAIL=1
-printf '3\n\n\n25001\n\n8.8.4.4\n\n' > "$TEST_ROOT/input"
+printf '3\n\n\n25001\n\n8.8.4.4\n\n\n' > "$TEST_ROOT/input"
 xm_menu_add < "$TEST_ROOT/input" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/fallback.log" || fail 'manual fallback after discovery failure'
 jq -e '.[4]=="25001" and .[5]=="8.8.4.4"' "$TEST_CALL" >/dev/null || fail 'manual fallback values'
 TEST_IP_FAIL=0; TEST_PORT_FAIL=0
@@ -192,10 +192,10 @@ mv "$TEST_ROOT/state.new" "$XM_STATE"
 printf '9\n2\n' > "$TEST_ROOT/input"
 xm_menu_node share < "$TEST_ROOT/input" > "$TEST_ROOT/stdout" 2> "$TEST_ROOT/select.log" || fail 'share numbered selection'
 jq -e '.[0]=="share" and .[1]=="second"' "$TEST_CALL" >/dev/null || fail 'share selection wrong ID'
-grep -q '\[1\].*ss2022.*First SS' "$TEST_ROOT/select.log" && grep -q '请输入 1..2' "$TEST_ROOT/select.log" || fail 'selection list/type/retry missing'
+grep -q '\[1\].*ss2022' "$TEST_ROOT/select.log" && grep -q '请输入 1..2' "$TEST_ROOT/select.log" || fail 'selection list/type/retry missing'
 printf '1\n0\n' > "$TEST_ROOT/input"
 xm_menu_node view < "$TEST_ROOT/input" > "$TEST_ROOT/view.json" 2> "$TEST_ROOT/view.log" || fail 'view numbered selection'
-grep -q 'ID first' "$TEST_ROOT/view.log" || fail 'view wrong node'
+grep -Eq 'ID +first' "$TEST_ROOT/view.log" || fail 'view wrong node'
 if grep -Fq "$(jq -r .password <<< "$TEST_NODE_A")" "$TEST_ROOT/view.log" "$TEST_ROOT/view.json"; then fail 'view leaked secret'; fi
 printf '2\n' > "$TEST_ROOT/input"
 xm_menu_node delete < "$TEST_ROOT/input" > /dev/null 2> "$TEST_ROOT/delete.log" || fail 'delete numbered selection'

@@ -6,14 +6,12 @@
 | --- | --- | --- |
 | `vless-reality` | VLESS + REALITY + Vision，TCP / RAW | UUID、X25519 密钥对、SNI、target、ShortID |
 | `vless-xhttp` | VLESS + XHTTP + REALITY | REALITY 参数、path、mode；不使用 Vision flow |
-| `shadowsocks` | Shadowsocks 2022，TCP / UDP | `2022-blake3-aes-128-gcm`，16 字节标准 Base64 密钥 |
+| `shadowsocks` | Shadowsocks 2022，TCP / UDP | `2022-blake3-aes-128-gcm` / `2022-blake3-aes-256-gcm`，分别为 16 / 32 字节标准 Base64 密钥 |
 | `vless-ws` | VLESS + WebSocket + TLS | UUID、SNI、WS 路径、证书与私钥 |
 | `socks5` | 认证 SOCKS5，TCP / UDP | 用户名和密码；协议本身无传输加密 |
-| `anytls` | AnyTLS + TLS，TCP | 密码、SNI、证书与私钥 |
 | `hysteria2` | Hysteria2 / HY2，QUIC / UDP | 密码、SNI、证书与私钥 |
-| `tuicv5` | TUIC v5，QUIC / UDP | UUID、密码、SNI、证书与私钥 |
 
-前五种协议使用 Xray，后三种使用 sing-box 辅助核心。默认核心版本分别为 Xray v26.3.27 和 sing-box 1.14.2。
+添加菜单与 CLI 支持以上六种协议，均使用 Xray，默认版本为 v26.10.29。历史辅助核心节点可继续管理、分享及备份。
 
 ## 通用字段
 
@@ -35,10 +33,14 @@ XHTTP 路径以 `/` 开头，长度 2–128，只接受 ASCII 字母、数字、
 ```sh
 xy add vless-reality reality-a 'REALITY' 1443 server.example.com genshin.hoyoverse.com genshin.hoyoverse.com:443
 xy add vless-xhttp xhttp-a 'XHTTP' 2443 server.example.com genshin.hoyoverse.com genshin.hoyoverse.com:443 /a7d390ef52c1068b packet-up
-xy add shadowsocks ss-a 'SS2022' 3443 server.example.com
+xy add shadowsocks ss-a 'SS2022 AES128' 3443 server.example.com
+# 空密码让脚本生成随机密钥；算法为可选的最后一个参数
+xy add shadowsocks ss-b 'SS2022 AES256' 3444 server.example.com '' 2022-blake3-aes-256-gcm
 ```
 
-## TLS 与其他协议
+## HY2 与 TLS
+
+新建 HY2 使用 Xray 的 Hysteria2 入站、TLS 1.3 和 QUIC / UDP，需要 Xray v26.10.29 或更新版本。旧 HY2 缺少 `engine` 字段时继续使用 sing-box；新节点保存 `engine: "xray"`，生成配置、健康检查和出站路由按所属核心处理。
 
 TLS 节点读取现有证书和匹配私钥，检查生效时间、有效期、SAN 与 SNI、公私钥对应关系。文件使用绝对路径，必须是普通文件且不能是符号链接；证书和私钥不可被组或其他用户写入，私钥不可被其他用户读取。仅接受未加密 PEM 私钥。
 
@@ -46,13 +48,11 @@ TLS 节点读取现有证书和匹配私钥，检查生效时间、有效期、S
 
 ```sh
 xy add vless-ws ws-a 'VLESS WS' 8443 server.example.com server.example.com /random-ws-path /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
-xy add anytls at-a 'AnyTLS' 8444 server.example.com server.example.com /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
 xy add hysteria2 hy-a 'HY2' 8445 server.example.com server.example.com /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
-xy add tuicv5 tc-a 'TUIC v5' 8446 server.example.com server.example.com /etc/ssl/xray/fullchain.pem /etc/ssl/xray/private.key
 xy add socks5 sk-a 'SOCKS5' 8447 server.example.com
 ```
 
-未提供的 UUID、用户名和密码自动生成。HY2 / TUIC 使用 UDP，防火墙和安全组应开放对应 UDP 端口。SOCKS5 始终启用用户名密码认证。
+未提供的 UUID、用户名和密码自动生成。HY2 使用 UDP，防火墙和安全组应开放对应 UDP 端口。SOCKS5 始终启用用户名密码认证。
 
 ## 修改与分享
 
@@ -64,8 +64,7 @@ xy add socks5 sk-a 'SOCKS5' 8447 server.example.com
 | XHTTP | path、mode |
 | SS2022 | password |
 | VLESS WS | UUID、SNI、path、TLS 证书与私钥 |
-| AnyTLS / HY2 | password、SNI、TLS 证书与私钥 |
-| TUIC v5 | UUID、password、SNI、TLS 证书与私钥 |
+| HY2 | password、SNI、TLS 证书与私钥 |
 | SOCKS5 | username、password |
 
 ```sh

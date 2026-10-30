@@ -499,3 +499,44 @@ for name,mode in [('console','0640 root xray-manager'),('extra-console','0640 ro
 print('PASS: all OpenRC log sources have bounded rotation and matching ownership/mode')
 PY
 printf 'PASS: log source selection, fixed journal units, default compatibility and symlink rejection\n'
+
+# Health ownership follows the persisted HY2 engine. No host processes, sockets
+# or init operations are inspected; only real state parsing is used here.
+(
+    health_root=$TEST_ROOT/main-health
+    mkdir -p "$health_root"
+    XM_BIN=$health_root/xray
+    XM_ETC=$health_root
+    printf '#!/bin/sh\nexit 0\n' > "$XM_BIN"
+    chmod 0700 "$XM_BIN"
+    printf '{}\n' > "$XM_ETC/config.json"
+    cat > "$XM_ETC/state.json" <<'STATE'
+{"nodes":[{"type":"hysteria2","engine":"xray","port":35001},{"type":"shadowsocks","port":35002},{"type":"socks5","port":35003},{"type":"hysteria2","port":35004},{"type":"hysteria2","engine":"sing-box","port":35005},{"type":"anytls","port":35006},{"type":"tuicv5","port":35007}]}
+STATE
+    _platform_paths() { return 0; }
+    platform_service() { return 0; }
+    _platform_core_pid() { printf '1234\n'; }
+    sleep() { :; }
+    HEALTH_CASE=good
+    ss() {
+        printf '%s\n' "$*" >> "$health_root/socket-calls"
+        case "$*" in
+            '-H -lunp sport = :35001')
+                case $HEALTH_CASE in
+                    missing) return 0 ;;
+                    wrong-pid) printf 'UNCONN users:(("xray",pid=9876,fd=9))\n'; return 0 ;;
+                    command-failed) return 1 ;;
+                esac ;;
+            '-H -ltnp sport = :35002'|'-H -lunp sport = :35002'|'-H -ltnp sport = :35003') ;;
+            *) return 98 ;;
+        esac
+        printf 'LISTENER users:(("xray",pid=1234,fd=9))\n'
+    }
+    : > "$health_root/socket-calls"
+    platform_health || fail 'native HY2 UDP health or mixed engine selection'
+    [[ $(wc -l < "$health_root/socket-calls") -eq 4 ]] || fail 'main health queried auxiliary nodes or HY2 TCP'
+    for HEALTH_CASE in missing wrong-pid command-failed; do
+        expect_fail platform_health
+    done
+)
+printf 'PASS: native HY2 health requires Xray-owned UDP, excludes legacy/explicit sing-box nodes and retains SS TCP/UDP checks\n'
