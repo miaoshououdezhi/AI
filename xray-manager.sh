@@ -41,6 +41,7 @@ xray-manager — Xray 中文交互管理
                                  按本机时区设置计划，需要确认或 --yes
   system-update-schedule disable 改为仅手动更新，需要确认或 --yes
   upgrade v版本                  指定核心版本升级，保留上一版供回退
+  upgrade-extra                  更新已安装的历史节点辅助核心，需要确认或 --yes
   rollback                       切换到上一版核心
   list                           列出节点（不显示秘密）
   add vless-reality ID 名称 端口 地址 SNI TARGET [UUID 私钥 公钥 ShortID]
@@ -123,9 +124,96 @@ xm_retire_trojan() {
     xm_info "已清退 $count 个不再支持的旧节点；保留其余节点与核心版本。"
 }
 
+# Repeat installation is a code/registration transaction even when entered
+# directly through install.sh instead of the update-manager wrapper.
+xm_install_refresh() (
+    local refresh_extra=${1:-0} tmp file target index active=0 result=0 failed=0
+    local old_lib=0 old_assets=0 lib_mode='' assets_mode='' lib_owner='' assets_owner=''
+    local -a code_files=(xray-manager.sh install.sh lib/common.sh lib/state.sh lib/platform.sh lib/protocol.sh assets/xray-outbound.py assets/xray-manager.service assets/xray-manager.openrc assets/xray-manager.logrotate assets/xray-manager-restart.service assets/xray-manager-restart.timer assets/xray-manager-restart.openrc assets/xray-manager-restart.py assets/xray-manager-system-update.service assets/xray-manager-system-update.timer assets/xray-manager-system-update.openrc assets/xray-manager-system-update.py assets/xy assets/xray-manager-extra.service assets/xray-manager-extra.openrc)
+    local -a targets=() existed=()
+    [[ $refresh_extra == 0 || $refresh_extra == 1 ]] || return 2
+    xm_path_no_links "$XM_HOME/lib" && xm_path_no_links "$XM_HOME/assets" || return 1
+    if [[ -d $XM_HOME/lib ]]; then old_lib=1; lib_mode=$(stat -c %a "$XM_HOME/lib") || return 1; lib_owner=$(stat -c %u:%g "$XM_HOME/lib") || return 1; fi
+    if [[ -d $XM_HOME/assets ]]; then old_assets=1; assets_mode=$(stat -c %a "$XM_HOME/assets") || return 1; assets_owner=$(stat -c %u:%g "$XM_HOME/assets") || return 1; fi
+    tmp=$(umask 077; mktemp -d "$XM_ETC/.install-code.XXXXXXXX") || return 1
+    _xm_install_finish() {
+        result=$1
+        trap - EXIT
+        # Repeated signals must not interrupt restoration halfway through.
+        trap '' INT TERM HUP
+        if [[ $active == 1 ]]; then
+            for ((index=0; index<${#targets[@]}; index++)); do
+                target=${targets[index]}
+                if ! xm_path_no_links "$target" || [[ -e $target && ! -f $target ]]; then failed=1; continue; fi
+                if [[ ${existed[index]} == 1 ]]; then
+                    # Copy the snapshot as data, preserving its original mode.
+                    # Never source or execute any file from the backup.
+                    local restore
+                    restore=$(mktemp "${target%/*}/.xray-manager-restore.XXXXXXXX") || { failed=1; continue; }
+                    if ! cp -p -- "$tmp/old/$index" "$restore" || ! mv -f -- "$restore" "$target"; then
+                        rm -f -- "$restore"; failed=1
+                    fi
+                else
+                    rm -f -- "$target" || failed=1
+                fi
+            done
+            if [[ $old_lib == 1 ]]; then
+                chmod "$lib_mode" "$XM_HOME/lib" || failed=1
+                if [[ -z ${XM_ROOT:-} ]]; then chown "$lib_owner" "$XM_HOME/lib" || failed=1; fi
+            elif [[ -d $XM_HOME/lib ]]; then rmdir -- "$XM_HOME/lib" 2>/dev/null || :; fi
+            if [[ $old_assets == 1 ]]; then
+                chmod "$assets_mode" "$XM_HOME/assets" || failed=1
+                if [[ -z ${XM_ROOT:-} ]]; then chown "$assets_owner" "$XM_HOME/assets" || failed=1; fi
+            elif [[ -d $XM_HOME/assets ]]; then rmdir -- "$XM_HOME/assets" 2>/dev/null || :; fi
+            if [[ ${XM_INIT:-} == systemd && -z ${XM_ROOT:-} ]]; then systemctl daemon-reload || failed=1; fi
+            if [[ $failed == 1 ]]; then
+                xm_error "安装失败且管理代码/服务定义恢复不完整；私密备份保留于 $tmp。"
+                return 1
+            fi
+            xm_error '安装失败，已恢复原管理代码与服务定义；核心及节点数据未由代码恢复步骤改写。'
+        fi
+        rm -rf -- "$tmp"
+        return "$result"
+    }
+    trap '_xm_install_finish $?' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    mkdir "$tmp/new" "$tmp/new/lib" "$tmp/new/assets" "$tmp/old" || return 1
+    # Validate and stage the entire source set before the first installed write.
+    for file in "${code_files[@]}"; do
+        xm_path_no_links "$XM_CODE_ROOT/$file" && [[ -f $XM_CODE_ROOT/$file ]] || { xm_error "程序文件缺失或不安全：$file"; return 1; }
+        cp -- "$XM_CODE_ROOT/$file" "$tmp/new/$file" || return 1
+        targets+=("$XM_HOME/$file")
+    done
+    # These operations only replace definitions; service running/enabled states
+    # are not changed. Prefix sandbox paths so fixtures never inspect the host.
+    targets+=("${XM_ROOT:-}$(_platform_main_service_path)" "${XM_ROOT:-}/etc/logrotate.d/xray-manager" "${XM_ROOT:-}/usr/local/bin/xy")
+    if [[ $refresh_extra == 1 ]]; then targets+=("${XM_ROOT:-}$(_platform_extra_service_path)"); fi
+    for ((index=0; index<${#targets[@]}; index++)); do
+        target=${targets[index]}
+        xm_path_no_links "$target" || return 1
+        existed+=(0)
+        if [[ -e $target ]]; then
+            [[ -f $target ]] || { xm_error "安装目标不是普通文件：$target"; return 1; }
+            if [[ -z ${XM_ROOT:-} && $(stat -c %u "$target") != 0 ]]; then xm_error "安装目标不属于 root：$target"; return 1; fi
+            if ((index >= ${#code_files[@]})); then _platform_owned_file "$target" || { xm_error "注册文件不属于本项目：$target"; return 1; }; fi
+            cp -p -- "$target" "$tmp/old/$index" || return 1
+            existed[index]=1
+        fi
+    done
+    # The installer and service helpers read one complete immutable staged set.
+    XM_CODE_ROOT=$tmp/new
+    _XM_PLATFORM_ASSETS=$tmp/new/assets
+    active=1
+    xm_install_code && platform_install_service || return 1
+    if [[ $refresh_extra == 1 ]]; then platform_extra_install_service || return 1; fi
+    platform_shortcut_install || return 1
+    active=0
+)
+
 xm_install() {
-    local version=${1:-$XM_DEFAULT_CORE_VERSION} refresh_extra=0 asset target install_failed=0 cleanup_failed=0
-    local -a added_schedule_assets=()
+    local version=${1:-$XM_DEFAULT_CORE_VERSION} refresh_extra=0
     (($# <= 1)) || { xm_usage_error 'install 最多接受一个版本参数。'; return 2; }
     xm_version_valid "$version" || return $?
     xm_require_root && platform_detect && platform_shortcut_preflight && platform_dependencies_snapshot && platform_dependencies && platform_prepare && xm_lock || return 1
@@ -135,26 +223,10 @@ xm_install() {
             platform_extra_ensure && platform_extra_preflight || return 1
             refresh_extra=1
         fi
-        # Old installed updaters cannot snapshot assets introduced by this
-        # release. If registration fails, remove only assets first created by
-        # this attempt before that updater restores its known code files.
-        for asset in xray-manager-system-update.service xray-manager-system-update.timer xray-manager-system-update.openrc xray-manager-system-update.py; do
-            target="$XM_HOME/assets/$asset"
-            [[ -e $target || -L $target ]] || added_schedule_assets+=("$asset")
-        done
-        xm_retire_trojan && xm_install_code && platform_install_service || install_failed=1
-        # Re-register owned service definitions without start/enable actions.
-        if [[ $install_failed == 0 && $refresh_extra == 1 ]]; then platform_extra_install_service || install_failed=1; fi
-        if [[ $install_failed == 0 ]]; then platform_shortcut_install || install_failed=1; fi
-        if [[ $install_failed == 1 ]]; then
-            for asset in "${added_schedule_assets[@]}"; do
-                target="$XM_HOME/assets/$asset"
-                [[ -e $target || -L $target ]] || continue
-                xm_path_no_links "$target" && [[ -f $target ]] && _platform_owned_file "$target" && cmp -s "$XM_CODE_ROOT/assets/$asset" "$target" && rm -f -- "$target" || cleanup_failed=1
-            done
-            [[ $cleanup_failed == 0 ]] || xm_error '安装失败，部分本次新增的系统更新计划资产未能安全清理，请检查受管目录。'
-            return 1
-        fi
+        # Legacy node retirement has its own state transaction; code recovery
+        # never overwrites node/core data or reverses that completed migration.
+        xm_retire_trojan || return 1
+        xm_install_refresh "$refresh_extra" || return $?
         xm_success "已安装核心 $(jq -r .core_version "$XM_STATE")；保留节点。更换核心请使用 upgrade。入口：xy。"
         return 0
     fi
@@ -180,6 +252,15 @@ xm_upgrade() {
     jq --arg version "$1" '.core_version=$version' "$XM_STATE" > "$XM_WORK_DIR/state.json" || return 1
     state_apply "$XM_WORK_DIR/state.json" "$XM_WORK_DIR/xray" || return 1
     xm_success "核心已切换至 ${1}，原运行状态已保留。"
+}
+xm_upgrade_extra() {
+    (($# == 0)) || { xm_usage_error 'upgrade-extra 不接受参数。'; return 2; }
+    xm_ready || return 1
+    [[ -x $XM_EXTRA_BIN ]] || { xm_error '未安装历史节点辅助核心，无需升级。'; return 1; }
+    xm_warning '将更新辅助核心至 sing-box 1.14.4；保留节点、主核心及原服务运行状态，失败时恢复旧辅助核心。'
+    xm_confirm '确认升级辅助核心？' || return 2
+    platform_extra_upgrade || return 1
+    xm_success '辅助核心安全升级完成。'
 }
 xm_rollback() {
     (($# == 0)) || { xm_usage_error 'rollback 不接受参数。'; return 2; }
@@ -578,8 +659,8 @@ xm_service() {
     xm_ready || return 1
     local main_running=0 extra_running=0 failed=0 action=$1
     local main_enabled=0 extra_enabled=0 include_extra=0 enabled_status=0
-    xm_service_call status >/dev/null 2>&1 && main_running=1
-    if [[ -x $XM_EXTRA_BIN ]]; then xm_extra_service_call status >/dev/null 2>&1 && extra_running=1; fi
+    main_running=$(xm_service_running main) || return 1
+    if [[ -x $XM_EXTRA_BIN ]]; then extra_running=$(xm_service_running extra) || return 1; fi
     if [[ $action == status ]]; then
         xm_info "Xray：$([[ $main_running == 1 ]] && printf 运行中 || printf 已停止)"
         xm_info "辅助核心：$([[ $extra_running == 1 ]] && printf 运行中 || printf 已停止或未安装)"
@@ -881,6 +962,7 @@ xm_dispatch() {
         help|-h|--help) xm_help ;;
         install) xm_install "$@" ;;
         upgrade) xm_upgrade "$@" ;;
+        upgrade-extra) xm_upgrade_extra "$@" ;;
         update-manager) xm_update_manager "$@" ;;
         update-system) xm_update_system "$@" ;;
         system-update-schedule) xm_system_update_schedule "$@" ;;
@@ -990,8 +1072,8 @@ xm_scheduled_restart() {
         *) xm_error '无法确认定时重启计划，未操作服务。'; return 1 ;;
     esac
     local main_running=0 extra_running=0 failed=0
-    xm_service_call status >/dev/null 2>&1 && main_running=1
-    if [[ -x $XM_EXTRA_BIN ]]; then xm_extra_service_call status >/dev/null 2>&1 && extra_running=1; fi
+    main_running=$(xm_service_running main) || return 1
+    if [[ -x $XM_EXTRA_BIN ]]; then extra_running=$(xm_service_running extra) || return 1; fi
     if [[ $main_running == 0 && $extra_running == 0 ]]; then xm_info '两个核心均未运行，跳过定时重启。'; return 0; fi
     xm_service_validate || return 1
     if [[ $main_running == 1 ]]; then xm_service_call restart && platform_health || failed=1; fi
@@ -1266,11 +1348,13 @@ xm_menu_upgrade() {
         printf '        发布：%s UTC\n\n' "${display_date/T/ }" >&2
     done
     xm_ui_item m '手动输入版本'
+    if [[ -x $XM_EXTRA_BIN ]]; then xm_ui_item s '升级历史节点辅助核心（sing-box）'; fi
     xm_ui_item 0 '返回'
     while :; do
         xm_read XM_CHOICE '选择版本' '0' || return 2
         case $XM_CHOICE in
             0) return 0 ;;
+            s|S) xm_dispatch upgrade-extra; return $? ;;
             m|M)
                 while :; do
                     xm_read XM_VERSION '目标版本（例 v26.10.31）' '' ':q 返回' || return 2
@@ -1281,7 +1365,7 @@ xm_menu_upgrade() {
                 if [[ $XM_CHOICE =~ ^[1-9][0-9]{0,2}$ ]] && ((XM_CHOICE <= ${#tags[@]})); then
                     index=$((XM_CHOICE-1)); XM_VERSION=${tags[index]}; selected_label='正式版'; [[ ${labels[index]} != preview ]] || selected_label='预览版'; break
                 fi
-                xm_error '请输入列表编号、m 或 0。'
+                xm_error '请输入列表编号、m、s 或 0。'
                 ;;
         esac
     done
@@ -1338,7 +1422,12 @@ xm_menu_render() {
         version=$(jq -r '.core_version | select(type=="string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' "$XM_STATE" 2>/dev/null)
         [[ -n $version ]] || { version='状态异常'; status_color=$XM_UI_RED; }
         count=$(jq '.nodes|length' "$XM_STATE" 2>/dev/null); [[ $count =~ ^[0-9]+$ ]] || count='?'
-        if platform_detect >/dev/null 2>&1 && xm_service_call status >/dev/null 2>&1; then status='运行中'; status_color=$XM_UI_GREEN; fi
+        if platform_detect >/dev/null 2>&1; then
+            local running
+            if running=$(xm_service_running main 2>/dev/null); then
+                if [[ $running == 1 ]]; then status='运行中'; status_color=$XM_UI_GREEN; fi
+            else status='状态未知'; status_color=$XM_UI_RED; fi
+        else status='状态未知'; status_color=$XM_UI_RED; fi
     fi
     printf '\n' >&2
     if [[ $width =~ ^[0-9]+$ && $width -lt 60 ]]; then printf '%sXray 管理%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; else printf '%s━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  Xray 管理  ·  xray-manager\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n' "$XM_UI_BOLD" "$XM_UI_RESET" >&2; fi

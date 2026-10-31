@@ -2,6 +2,8 @@
 # xray-manager-owned:1
 description="Xray Manager core"
 supervisor="supervise-daemon"
+# Disable Go default MPTCP for this service, including its native check.
+export GODEBUG=multipathtcp=0
 command="/bin/setpriv"
 command_args="--reuid=xray-manager --regid=xray-manager --init-groups --bounding-set=-all,+net_bind_service --inh-caps=+net_bind_service --ambient-caps=+net_bind_service --no-new-privs /opt/xray-manager/bin/xray run -config /etc/xray-manager/config.json"
 directory="/var/lib/xray-manager"

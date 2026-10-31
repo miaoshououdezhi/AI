@@ -128,8 +128,14 @@ state_apply() {
     fi
     if [[ -f $XM_STATE ]] && protocol_has_extra "$XM_STATE"; then old_has_extra=1; fi
     XM_TX_RUNNING=0; XM_TX_EXTRA_RUNNING=0; XM_TX_CORE=0; XM_TX_HISTORY=0
-    xm_service_call status >/dev/null 2>&1 && XM_TX_RUNNING=1
-    if [[ $XM_TX_EXTRA_AVAILABLE == 1 ]]; then xm_extra_service_call status >/dev/null 2>&1 && XM_TX_EXTRA_RUNNING=1; fi
+    # First install has no registered main service yet. Existing installs must
+    # distinguish a stopped service from an unavailable init/state query.
+    if [[ -f $XM_STATE ]]; then XM_TX_RUNNING=$(xm_service_running main) || failed=1; fi
+    if [[ $XM_TX_EXTRA_AVAILABLE == 1 ]]; then XM_TX_EXTRA_RUNNING=$(xm_service_running extra) || failed=1; fi
+    if [[ $failed == 1 ]]; then
+        if [[ $XM_TX_EXTRA_PREPARED == 1 ]]; then platform_extra_discard_new "$XM_TX_EXTRA_HAD_BIN" "$XM_TX_EXTRA_HAD_SERVICE" || xm_error '新辅助核心资源撤销失败，请诊断。'; fi
+        XM_TX_EXTRA_PREPARED=0; xm_temp_cleanup; return 1
+    fi
     if [[ -f $XM_STATE ]]; then cp -p -- "$XM_STATE" "$XM_TEMP_DIR/old-state.json" || failed=1; fi
     if [[ -f $XM_CONFIG ]]; then cp -p -- "$XM_CONFIG" "$XM_TEMP_DIR/old-config.json" || failed=1; fi
     if [[ -f $XM_EXTRA_CONFIG ]]; then cp -p -- "$XM_EXTRA_CONFIG" "$XM_TEMP_DIR/old-extra.json" || failed=1; fi

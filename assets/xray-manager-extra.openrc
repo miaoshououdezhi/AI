@@ -3,6 +3,8 @@
 # shellcheck shell=sh disable=SC2034
 description="Xray Manager auxiliary sing-box"
 supervisor="supervise-daemon"
+# Disable Go default MPTCP for this service, including its native check.
+export GODEBUG=multipathtcp=0
 command="/bin/setpriv"
 command_args="--reuid=xray-manager --regid=xray-manager --init-groups --bounding-set=-all,+net_bind_service --inh-caps=+net_bind_service --ambient-caps=+net_bind_service --no-new-privs /opt/xray-manager/bin/sing-box run -c /etc/xray-manager/extra.json"
 directory="/var/lib/xray-manager"

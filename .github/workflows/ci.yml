@@ -5,6 +5,12 @@ on:
 permissions:
   contents: read
 jobs:
+  release-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify immutable public installer runtime
+        run: python3 tests/check-release-pin.py
   static-and-unit:
     runs-on: ubuntu-latest
     steps:
@@ -38,6 +44,11 @@ jobs:
         run: bash tests/test-interactive.sh
       - name: Management script update and code rollback
         run: bash tests/test-manager-update.sh
+      - name: Security runtime, service state and auxiliary upgrade transactions
+        run: |
+          bash tests/test-runtime-security.sh
+          bash tests/test-extra-update.sh
+          bash tests/test-install-rollback.sh
       - name: Node creation and terminal layout
         run: bash tests/test-node-ux.sh
       - name: SS2022 algorithms and key validation
@@ -83,6 +94,7 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" "$IMAGE" sh -ec '
             if command -v apk >/dev/null; then apk add --no-cache bash; else apt-get update && apt-get install -y bash; fi
             bash -c '\''
+              export GODEBUG=multipathtcp=0
               source /src/lib/common.sh
               source /src/lib/platform.sh
               source /src/lib/protocol.sh

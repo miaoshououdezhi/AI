@@ -13,6 +13,8 @@ User=xray-manager
 Group=xray-manager
 UMask=0027
 WorkingDirectory=/var/lib/xray-manager
+# Per-process mitigation only; CVE-2026-98432 still requires a patched kernel.
+Environment=GODEBUG=multipathtcp=0
 ExecStart=/opt/xray-manager/bin/sing-box run -c /etc/xray-manager/extra.json
 Restart=on-failure
 RestartSec=3

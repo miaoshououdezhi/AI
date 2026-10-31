@@ -10,7 +10,7 @@ reject() { if "$@" >"$tmp/out" 2>"$tmp/err"; then fail "unexpected success: $*";
 for tuple in amd64:glibc amd64:musl arm64:glibc arm64:musl; do
     XM_ARCH=${tuple%:*}; XM_LIBC=${tuple#*:}
     entry=$(_platform_extra_asset)
-    [[ $entry == "sing-box-1.14.2-linux-$XM_ARCH-$XM_LIBC"$'\t'* ]] || fail 'arch/libc asset mapping'
+    [[ $entry == "sing-box-1.14.4-linux-$XM_ARCH-$XM_LIBC"$'\t'* ]] || fail 'arch/libc asset mapping'
 done
 XM_ARCH=bad; reject _platform_extra_asset
 python3 - "$tmp" <<'PY'
