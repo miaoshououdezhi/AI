@@ -8,7 +8,7 @@ export XM_ROOT=$scratch/root
 source "$repo/xray-manager.sh"
 trap 'rm -rf -- "$scratch"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-[[ $XM_DEFAULT_CORE_VERSION == v26.10.29 ]] || fail 'default stable version'
+[[ $XM_DEFAULT_CORE_VERSION == v26.10.31 ]] || fail 'default stable version'
 # Removed protocols cannot reach filesystem preparation through the CLI.
 xm_ready() { touch "$scratch/reached-ready"; return 1; }
 for type in anytls tuicv5; do
@@ -23,7 +23,7 @@ printf 'Xray %s (fixture)\n' "$TEST_CORE_VERSION"
 CORE
 chmod 0700 "$scratch/core"
 XM_BIN=$scratch/core
-for version in 26.10.29 26.11.1; do export TEST_CORE_VERSION=$version; xm_hy2_core_ready; done
+for version in 26.10.29 26.10.31 26.11.1; do export TEST_CORE_VERSION=$version; xm_hy2_core_ready; done
 for version in 26.3.27 26.10.28 malformed; do
     export TEST_CORE_VERSION=$version
     if xm_hy2_core_ready > "$scratch/out" 2> "$scratch/err"; then fail 'old/unknown core accepted for new HY2'; fi

@@ -33,7 +33,7 @@ xray-manager — Xray 中文交互管理
 用法：xy（或 bash xray-manager.sh） [--yes] <命令> [参数]
 无参数：打开交互菜单；help：显示本帮助。
 
-  install [v版本]                 安装，默认 v26.10.29；重复安装保留节点
+  install [v版本]                 安装，默认 v26.10.31；重复安装保留节点
   update-manager                 获取项目 main 的最新管理脚本（保留核心/节点）
   update-system                  更新当前 Debian/Alpine 软件包，需要确认或 --yes
   system-update-schedule status 查看系统包定时更新状态
@@ -1273,7 +1273,7 @@ xm_menu_upgrade() {
             0) return 0 ;;
             m|M)
                 while :; do
-                    xm_read XM_VERSION '目标版本（例 v26.10.29）' '' ':q 返回' || return 2
+                    xm_read XM_VERSION '目标版本（例 v26.10.31）' '' ':q 返回' || return 2
                     xm_version_valid "$XM_VERSION" && break
                 done
                 selected_label='手动指定版本'; break ;;

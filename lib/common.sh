@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Common functions; sourcing this file has no filesystem or service side effects.
 export XM_PRODUCT=xray-manager
-export XM_DEFAULT_CORE_VERSION=v26.10.29
+export XM_DEFAULT_CORE_VERSION=v26.10.31
 XM_ROOT=${XM_ROOT:-}
 XM_HOME="${XM_ROOT}/opt/xray-manager"
 XM_ETC="${XM_ROOT}/etc/xray-manager"

@@ -93,8 +93,8 @@ jobs:
               export XM_ROOT=/tmp/xm-smoke
               source /src/lib/common.sh
               platform_prepare || exit 1
-              platform_fetch_core v26.10.29 "$XM_BIN" || exit 1
-              printf "{\"schema_version\":1,\"core_version\":\"v26.10.29\",\"nodes\":[]}\n" > "$XM_ETC/state.json"
+              platform_fetch_core v26.10.31 "$XM_BIN" || exit 1
+              printf "{\"schema_version\":1,\"core_version\":\"v26.10.31\",\"nodes\":[]}\n" > "$XM_ETC/state.json"
               protocol_generate "$XM_ETC/state.json" "$XM_ETC/config.json" || exit 1
               "$XM_BIN" run -test -config "$XM_ETC/config.json" || exit 1
               XRAY_BIN="$XM_BIN" bash /src/tests/test-ss2022.sh || exit 1
