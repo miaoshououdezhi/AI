@@ -40,7 +40,7 @@ xy add shadowsocks ss-b 'SS2022 AES256' 3444 server.example.com '' 2022-blake3-a
 
 ## HY2 与 TLS
 
-新建 HY2 使用 Xray 的 Hysteria2 入站、TLS 1.3 和 QUIC / UDP，功能最低要求为 Xray v26.10.29；该版已被上游撤下，请安装 v26.10.31 或更新正式版。旧 HY2 缺少 `engine` 字段时继续使用 sing-box；新节点保存 `engine: "xray"`，生成配置、健康检查和出站路由按所属核心处理。
+新建 HY2 使用 Xray 的 Hysteria2 入站、TLS 1.3 和 QUIC / UDP，建议使用 Xray v26.10.31 或更新正式版。旧 HY2 缺少 `engine` 字段时继续使用 sing-box；新节点保存 `engine: "xray"`，生成配置、健康检查和出站路由按所属核心处理。
 
 TLS 节点读取现有证书和匹配私钥，检查生效时间、有效期、SAN 与 SNI、公私钥对应关系。文件使用绝对路径，必须是普通文件且不能是符号链接；证书和私钥不可被组或其他用户写入，私钥不可被其他用户读取。仅接受未加密 PEM 私钥。
 
