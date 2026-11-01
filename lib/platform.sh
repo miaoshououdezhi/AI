@@ -360,14 +360,29 @@ platform_remove_service() {
     # Preserve dedicated account and private data for reinstall or explicit shell cleanup.
 }
 
-platform_service() {
-    local action=${1:-} service
-    case $action in start|stop|restart|status|enable|disable) ;; *) _platform_error '未知服务操作。'; return 1 ;; esac
-    _platform_init_available || return 1
-    if [[ $XM_INIT == systemd ]]; then service=/etc/systemd/system/xray-manager.service; else service=/etc/init.d/xray-manager; fi
-    _platform_owned_file "$service" || { _platform_error '服务不属于本项目或尚未安装。'; return 1; }
+# 0 = running, 1 = explicitly stopped, 2 = unknown/error/transitional.
+# OpenRC _status(): started=0, stopped=3; starting/stopping/crashed differ.
+_platform_service_running() {
+    local name=$1 state status=0
     if [[ $XM_INIT == systemd ]]; then
-        if [[ $action == status ]]; then systemctl is-active --quiet xray-manager.service; else systemctl "$action" xray-manager.service; fi
+        state=$(systemctl is-active "$name.service") || status=$?
+        case $state:$status in active:0) return 0 ;; inactive:3|failed:3) return 1 ;; *) return 2 ;; esac
+    else
+        rc-service "$name" status >/dev/null 2>&1 || status=$?
+        case $status in 0) return 0 ;; 3) return 1 ;; *) return 2 ;; esac
+    fi
+}
+
+platform_service() {
+    local action=${1:-} service failure=1
+    case $action in start|stop|restart|status|enable|disable) ;; *) _platform_error '未知服务操作。'; return 1 ;; esac
+    [[ $action != status ]] || failure=2
+    _platform_init_available || return "$failure"
+    if [[ $XM_INIT == systemd ]]; then service=/etc/systemd/system/xray-manager.service; else service=/etc/init.d/xray-manager; fi
+    _platform_owned_file "$service" || { _platform_error '服务不属于本项目或尚未安装。'; return "$failure"; }
+    if [[ $action == status ]]; then _platform_service_running xray-manager; return $?; fi
+    if [[ $XM_INIT == systemd ]]; then
+        systemctl "$action" xray-manager.service
     else
         case $action in
             enable) rc-update add xray-manager default ;;
@@ -1221,7 +1236,7 @@ _platform_schedule_pid_preflight() {
     fi
 }
 
-# Optional sing-box engine, pinned official archive digests (release v1.14.2).
+# Optional sing-box engine, pinned official archive digests (release v1.14.4).
 _platform_extra_paths() {
     _platform_paths || return 1
     XM_EXTRA_BIN=${XM_EXTRA_BIN:-$XM_HOME/bin/sing-box}
@@ -1230,21 +1245,17 @@ _platform_extra_paths() {
 }
 _platform_extra_asset() {
     case ${XM_ARCH:-}:${XM_LIBC:-} in
-        amd64:glibc) printf 'sing-box-1.14.2-linux-amd64-glibc\t5c7bc18461827b28d0e5ee7e89d33b276d3ff7c818531104c8e8d26d85b0656e\n' ;;
-        amd64:musl) printf 'sing-box-1.14.2-linux-amd64-musl\t8f6cb4bcf94d2b33c65d52e0d5b142db29a938336f1ff7267f397ac3758fc297\n' ;;
-        arm64:glibc) printf 'sing-box-1.14.2-linux-arm64-glibc\t87db5c3a96ebad1c44c0be1fe7955db2f76b8c97bbc0ed62173063d675e078cf\n' ;;
-        arm64:musl) printf 'sing-box-1.14.2-linux-arm64-musl\t675297394f9430cebb72b3c48ba8bce0d6f7c750a9d68a8f7f88c515c8255cd1\n' ;;
+        amd64:glibc) printf 'sing-box-1.14.4-linux-amd64-glibc\t231e57c18378f780a08de832844a1ca9716e17a7bcf82964b350844d243c03ac\n' ;;
+        amd64:musl) printf 'sing-box-1.14.4-linux-amd64-musl\t8f7c5f0651238850d96a0e488e5473cd77ec1a0098f63942e943f475a12057ca\n' ;;
+        arm64:glibc) printf 'sing-box-1.14.4-linux-arm64-glibc\t241cb4ccbf1a003235f8a969cc25d28cc74487df52721f6de28be7e37eae2ae9\n' ;;
+        arm64:musl) printf 'sing-box-1.14.4-linux-arm64-musl\tb95e25f921dc5e17a4cf13327243d1177642c7e35425bf5372862c477c359f56\n' ;;
         *) _platform_error '不支持的辅助核心架构/libc。'; return 1 ;;
     esac
 }
-platform_extra_ensure() (
-    _platform_extra_paths && _platform_real || return 1
-    _platform_owned_dir "$XM_HOME" && _platform_owned_dir "$XM_ETC" || return 1
+_platform_extra_installed_version() {
     _platform_no_symlink "$XM_EXTRA_BIN" && _platform_no_symlink "$XM_ETC/extra-core.sha256" || return 1
-    local tmp asset digest version
-    if [[ -e $XM_EXTRA_BIN ]]; then
-        [[ -x $XM_EXTRA_BIN && -f $XM_ETC/extra-core.sha256 ]] || { _platform_error '现有辅助核心缺少本项目校验记录，拒绝接管。'; return 1; }
-        _platform_python - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PY'
+    [[ -f $XM_EXTRA_BIN && -x $XM_EXTRA_BIN && -f $XM_ETC/extra-core.sha256 ]] || { _platform_error '现有辅助核心缺少本项目校验记录，拒绝接管。'; return 1; }
+    if ! _platform_python - "$XM_EXTRA_BIN" "$XM_ETC/extra-core.sha256" <<'PYHASH'
 import hashlib,pathlib,re,sys
 b,p=map(pathlib.Path,sys.argv[1:])
 if p.stat().st_size>128:sys.exit(1)
@@ -1252,26 +1263,100 @@ h=p.read_text().strip();actual=hashlib.sha256()
 with b.open('rb') as f:
  for data in iter(lambda:f.read(1024*1024),b''):actual.update(data)
 if not re.fullmatch('[0-9a-f]{64}',h) or actual.hexdigest()!=h:sys.exit(1)
-PY
-        [[ $? == 0 ]] || { _platform_error '现有辅助核心完整性检查失败。'; return 1; }
-        version=$("$XM_EXTRA_BIN" version) || return 1
-        [[ ${version%%$'\n'*} == 'sing-box version 1.14.2' ]] || { _platform_error '辅助核心版本必须为 1.14.2。'; return 1; }
+PYHASH
+    then _platform_error '现有辅助核心完整性检查失败。'; return 1; fi
+    local version
+    version=$("$XM_EXTRA_BIN" version) || return 1
+    case ${version%%$'\n'*} in
+        'sing-box version 1.14.2'|'sing-box version 1.14.4') printf '%s\n' "${version%%$'\n'*}" ;;
+        *) _platform_error '辅助核心版本不属于受管版本（1.14.2 / 1.14.4）。'; return 1 ;;
+    esac
+}
+# Stage only: callers own the private directory, destination and cleanup.
+_platform_extra_download() {
+    local tmp=$1 asset digest version
+    IFS=$'\t' read -r asset digest < <(_platform_extra_asset)
+    [[ -n $asset && $digest =~ ^[0-9a-f]{64}$ ]] || return 1
+    _platform_info '获取并校验辅助核心 sing-box 1.14.4。'
+    curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --output "$tmp/core.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/$asset.tar.gz" || return 1
+    _platform_extra_verify_archive "$tmp/core.tar.gz" "$digest" "$asset" "$XM_ARCH" "$tmp/core" "$tmp/hash" || return 1
+    chmod 0755 "$tmp/core" && chmod 0600 "$tmp/hash" || return 1
+    version=$("$tmp/core" version) || return 1
+    [[ ${version%%$'\n'*} == 'sing-box version 1.14.4' ]] || { _platform_error '下载辅助核心版本与固定版本不符。'; return 1; }
+}
+platform_extra_ensure() (
+    _platform_extra_paths && _platform_real || return 1
+    _platform_owned_dir "$XM_HOME" && _platform_owned_dir "$XM_ETC" || return 1
+    _platform_no_symlink "$XM_EXTRA_BIN" && _platform_no_symlink "$XM_ETC/extra-core.sha256" || return 1
+    local tmp version
+    if [[ -e $XM_EXTRA_BIN ]]; then
+        version=$(_platform_extra_installed_version) || return 1
+        if [[ $version == 'sing-box version 1.14.2' ]]; then
+            _platform_warning '辅助核心 1.14.2 使用旧 Go 构建；请执行 xy upgrade-extra 升级到 1.14.4。'
+        fi
         return 0
     fi
     [[ ! -e $XM_ETC/extra-core.sha256 ]] || { _platform_error '辅助核心校验记录存在但核心丢失，请检查受管目录。'; return 1; }
-    IFS=$'\t' read -r asset digest < <(_platform_extra_asset)
-    [[ -n $asset && $digest =~ ^[0-9a-f]{64}$ ]] || return 1
     tmp=$(umask 077; mktemp -d "$XM_ETC/.extra-download.XXXXXXXX") || return 1
     trap 'rm -rf -- "$tmp"' EXIT
-    _platform_info '获取并校验辅助核心 sing-box 1.14.2。'
-    curl --http1.1 --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --output "$tmp/core.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/$asset.tar.gz" || return 1
-    _platform_extra_verify_archive "$tmp/core.tar.gz" "$digest" "$asset" "$XM_ARCH" "$tmp/core" "$tmp/hash"
-    [[ $? == 0 ]] || return 1
-    chmod 0755 "$tmp/core" && chmod 0600 "$tmp/hash" || return 1
-    version=$("$tmp/core" version) || return 1
-    [[ ${version%%$'\n'*} == 'sing-box version 1.14.2' ]] || { _platform_error '下载辅助核心版本与固定版本不符。'; return 1; }
+    _platform_extra_download "$tmp" || return 1
     ln -- "$tmp/core" "$XM_EXTRA_BIN" || return 1
     if ! ln -- "$tmp/hash" "$XM_ETC/extra-core.sha256"; then rm -f -- "$XM_EXTRA_BIN"; return 1; fi
+)
+platform_extra_upgrade() (
+    (($# == 0)) || { _platform_error '辅助核心升级不接受参数。'; return 2; }
+    _platform_extra_paths && _platform_real || return 1
+    _platform_owned_dir "$XM_HOME" && _platform_owned_dir "$XM_ETC" || return 1
+    [[ -e $XM_EXTRA_BIN || -L $XM_EXTRA_BIN ]] || { _platform_error '未安装辅助核心，无需升级。'; return 1; }
+    local version tmp running=0 status=0 active=0
+    version=$(_platform_extra_installed_version) || return 1
+    platform_extra_preflight || return 1
+    _platform_no_symlink "$XM_EXTRA_CONFIG" || return 1
+    [[ ! -e $XM_EXTRA_CONFIG || -f $XM_EXTRA_CONFIG ]] || { _platform_error '辅助核心配置不是普通文件。'; return 1; }
+    if [[ $version == 'sing-box version 1.14.4' ]]; then _platform_info '辅助核心已经是 1.14.4。'; return 0; fi
+    if platform_extra_service status; then running=1; else
+        status=$?
+        [[ $status == 1 ]] || { _platform_error '无法确定辅助服务运行状态，未升级。'; return 1; }
+    fi
+    [[ $running == 0 || -f $XM_EXTRA_CONFIG ]] || { _platform_error '运行中的辅助核心缺少配置，未升级。'; return 1; }
+    tmp=$(umask 077; mktemp -d "$XM_ETC/.extra-upgrade.XXXXXXXX") || return 1
+    _platform_extra_upgrade_finish() {
+        local result=$1 failed=0
+        trap - EXIT
+        # Recovery must not itself be interrupted by another catchable signal.
+        trap '' INT TERM HUP
+        if [[ $active == 1 ]]; then
+            if [[ $running == 1 ]]; then platform_extra_service stop >/dev/null 2>&1 || failed=1; fi
+            xm_atomic_copy "$tmp/old-core" "$XM_EXTRA_BIN" 0755 || failed=1
+            xm_atomic_copy "$tmp/old-hash" "$XM_ETC/extra-core.sha256" 0600 || failed=1
+            if [[ $running == 1 && $failed == 0 ]]; then
+                platform_extra_service start >/dev/null 2>&1 && platform_extra_health >/dev/null 2>&1 || failed=1
+            fi
+            if [[ $failed == 1 ]]; then
+                _platform_error "辅助核心自动恢复未完成，请保留恢复目录并检查服务：$tmp" || :
+                return 1
+            fi
+            _platform_warning '已恢复升级前的辅助核心、校验记录及运行状态。'
+        fi
+        rm -rf -- "$tmp" || return 1
+        return "$result"
+    }
+    trap '_platform_extra_upgrade_finish $?; exit $?' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    _platform_extra_download "$tmp" || return 1
+    if [[ -f $XM_EXTRA_CONFIG ]]; then
+        "$tmp/core" check -c "$XM_EXTRA_CONFIG" > "$tmp/native-check.log" 2>&1 || { _platform_error '新辅助核心配置校验失败，旧核心未改变。'; return 1; }
+    fi
+    cp -p -- "$XM_EXTRA_BIN" "$tmp/old-core" && cp -p -- "$XM_ETC/extra-core.sha256" "$tmp/old-hash" || return 1
+    chmod 0700 "$tmp/old-core" && chmod 0600 "$tmp/old-hash" || return 1
+    active=1
+    if [[ $running == 1 ]]; then platform_extra_service stop || return 1; fi
+    xm_atomic_copy "$tmp/core" "$XM_EXTRA_BIN" 0755 && xm_atomic_copy "$tmp/hash" "$XM_ETC/extra-core.sha256" 0600 || return 1
+    if [[ $running == 1 ]]; then platform_extra_service start && platform_extra_health || return 1; fi
+    active=0
+    _platform_info '辅助核心已升级至 1.14.4，原运行状态已保留。'
 )
 _platform_extra_service_path() {
     if [[ $XM_INIT == systemd ]]; then printf /etc/systemd/system/xray-manager-extra.service; else printf /etc/init.d/xray-manager-extra; fi
@@ -1312,19 +1397,21 @@ platform_extra_install_service() {
     [[ $XM_INIT != systemd ]] || _platform_schedule_command systemctl daemon-reload
 }
 platform_extra_service() {
-    local action=${1:-} target
+    local action=${1:-} target failure=1
     case $action in start|stop|restart|status|enable|disable) ;; *) _platform_error '未知辅助服务操作。'; return 2 ;; esac
-    platform_extra_preflight || return 1
+    [[ $action != status ]] || failure=2
+    platform_extra_preflight || return "$failure"
     target=$(_platform_extra_service_path)
     if [[ ! -e $target ]]; then
-        case $action in stop|disable) return 0 ;; *) return 1 ;; esac
+        case $action in stop|disable) return 0 ;; *) return "$failure" ;; esac
     fi
-    _platform_owned_file "$target" || return 1
+    _platform_owned_file "$target" || return "$failure"
+    if [[ $action == status ]]; then _platform_service_running xray-manager-extra; return $?; fi
     if [[ $action == start || $action == restart ]]; then
         "$XM_EXTRA_BIN" check -c "$XM_EXTRA_CONFIG" >/dev/null || return 1
     fi
     if [[ $XM_INIT == systemd ]]; then
-        if [[ $action == status ]]; then systemctl is-active --quiet xray-manager-extra.service; else _platform_schedule_command systemctl "$action" xray-manager-extra.service; fi
+        _platform_schedule_command systemctl "$action" xray-manager-extra.service
     else
         case $action in
             enable) _platform_schedule_command rc-update add xray-manager-extra default ;;

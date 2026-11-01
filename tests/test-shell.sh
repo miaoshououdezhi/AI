@@ -170,6 +170,8 @@ pass 'uninstall refuses ancestor symlink before service changes or deletion'
     platform_install_service() { return 0; }
     platform_shortcut_install() { return 0; }
     xm_install_code() { printf 'updated\n' > "$ROOT/migration-code"; }
+    # Migration fixtures isolate code registration; full copy rollback has its own tests.
+    xm_install_refresh() { xm_install_code && platform_install_service && { [[ $1 != 1 ]] || platform_extra_install_service; } && platform_shortcut_install; }
     make_legacy() {
         jq -n '{schema_version:1,core_version:"v26.3.27",nodes:[{id:"keep",type:"shadowsocks",port:3443},{id:"retired",type:"trojan",port:2443,cert:"/expired/no-certificate",key:"/expired/no-key",password:"private-test-fixture"}]}' > "$XM_STATE"
         protocol_generate "$XM_STATE" "$XM_CONFIG"
@@ -271,7 +273,7 @@ pass 'single document/object/128-node/duplicate checks precede complete protocol
     cp "$REPO/assets/xray-manager-system-update.service" "$XM_HOME/assets/xray-manager-system-update.service"
     cp "$XM_HOME/assets/xray-manager-system-update.service" "$ROOT/preexisting-update-service"
     # shellcheck disable=SC1090
-    source <(sed -n '/^xm_install_code() {/,/^}/p; /^xm_install() {/,/^}/p' "$REPO/xray-manager.sh") || fail 'schedule rollback helpers'
+    source <(sed -n '/^xm_install_code() {/,/^}/p; /^xm_install_refresh() (/,/^)/p; /^xm_install() {/,/^}/p' "$REPO/xray-manager.sh") || fail 'schedule rollback helpers'
     # Keep the actual code-copy implementation for service/shortcut failures.
     # shellcheck disable=SC1090
     source <(declare -f xm_install_code | sed '1s/^xm_install_code ()/xm_install_code_real ()/')

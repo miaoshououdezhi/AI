@@ -193,6 +193,22 @@ xm_extra_service_call() {
     if [[ -n $XM_LOCK_FD ]]; then platform_extra_service "$@" {XM_LOCK_FD}>&-; else platform_extra_service "$@"; fi
 }
 
+# A failed init query must never become a stopped-service snapshot.
+# Platform status is normalized: 0 running, 1 stopped, 2 unknown/error.
+xm_service_running() {
+    local result=0
+    case ${1:-} in
+        main) xm_service_call status >/dev/null 2>&1 || result=$? ;;
+        extra) xm_extra_service_call status >/dev/null 2>&1 || result=$? ;;
+        *) return 2 ;;
+    esac
+    case $result in
+        0) printf '1\n' ;;
+        1) printf '0\n' ;;
+        *) xm_error "无法确认 ${1} 核心服务运行状态，未继续操作。"; return 1 ;;
+    esac
+}
+
 # Batch display copies only. Never send node JSON or secrets in child argv.
 xm_ui_format() {
     "${XM_PYTHON:-python3}" -c '

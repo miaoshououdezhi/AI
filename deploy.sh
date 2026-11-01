@@ -74,7 +74,7 @@ esac
 xray_boot_info '正在下载固定版本的管理脚本。'
 curl --http1.1 --fail --location --proto "=https" --proto-redir "=https" --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 300 \
   -o "$xray_tmp/project.tar.gz" \
-  https://github.com/miaoshououdezhi/AI/archive/da2a9623ca4a70d816bdb06a21cdf0dd85bbf06b.tar.gz
+  https://github.com/miaoshououdezhi/AI/archive/da3bdaebc384ffb46477a7cc486e6d3e792000eb.tar.gz
 xray_boot_info '正在解压并启动安装。'
 mkdir "$xray_tmp/project"
 tar -xzf "$xray_tmp/project.tar.gz" -C "$xray_tmp/project" --strip-components=1
